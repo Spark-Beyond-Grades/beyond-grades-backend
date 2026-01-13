@@ -389,4 +389,33 @@ router.get("/:id", async (req, res) => {
   }
 });
 
+router.post("/:id/close", async (req, res) => {
+  try {
+    const event = await Event.findById(req.params.id);
+    if (!event) return res.status(404).json({ ok: false, message: "Event not found" });
+
+    // Only allow closing if it's currently OPEN
+    const effective = computeEffectiveStatus(event);
+    if (effective !== "OPEN") {
+      return res.status(400).json({ ok: false, message: "Only OPEN events can be closed" });
+    }
+
+    event.status = "CLOSED";
+    event.closeAtActual = new Date();
+    await event.save();
+
+    return res.json({
+      ok: true,
+      message: "Event closed successfully",
+      event: {
+        ...event.toObject(),
+        effectiveStatus: computeEffectiveStatus(event),
+      },
+    });
+  } catch (err) {
+    console.error("❌ POST /events/:id/close:", err.message);
+    return res.status(500).json({ ok: false, message: "Failed to close event" });
+  }
+});
+
 module.exports = router;
