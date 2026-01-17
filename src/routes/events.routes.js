@@ -27,6 +27,7 @@ router.post("/", async (req, res) => {
       type,
       description,
       createdByEmail: req.user.email,
+      groupId: req.user.groupId,
       status: "DRAFT",
     });
 
@@ -51,7 +52,7 @@ router.post("/", async (req, res) => {
  */
 router.get("/", async (req, res) => {
   try {
-    const events = await Event.find().sort({ createdAt: -1 });
+    const events = await Event.find({ groupId: req.user.groupId }).sort({ createdAt: -1 });
 
     const mapped = events.map((e) => ({
       ...e.toObject(),
@@ -84,7 +85,10 @@ router.put("/:id", async (req, res) => {
       skills,
     } = req.body || {};
 
-    const event = await Event.findById(req.params.id);
+    const event = await Event.findOne({
+      _id: req.params.id,
+      groupId: req.user.groupId,
+    });
     if (!event) {
       return res.status(404).json({ ok: false, message: "Event not found" });
     }
@@ -204,7 +208,17 @@ router.put("/:id", async (req, res) => {
 
 router.get("/:id/participants", async (req, res) => {
   try {
-    const participants = await Participant.find({ eventId: req.params.id }).sort({
+    // ✅ First ensure event belongs to this authority’s group
+    const event = await Event.findOne({
+      _id: req.params.id,
+      groupId: req.user.groupId,
+    });
+
+    if (!event) {
+      return res.status(404).json({ ok: false, message: "Event not found" });
+    }
+
+    const participants = await Participant.find({ eventId: event._id }).sort({
       createdAt: -1,
     });
     return res.json({ ok: true, participants });
@@ -220,7 +234,10 @@ router.post("/:id/participants/upload", upload.single("file"), async (req, res) 
       return res.status(400).json({ ok: false, message: "CSV file is required" });
     }
 
-    const event = await Event.findById(req.params.id);
+    const event = await Event.findOne({
+      _id: req.params.id,
+      groupId: req.user.groupId,
+    });
     if (!event) return res.status(404).json({ ok: false, message: "Event not found" });
 
     const csvText = req.file.buffer.toString("utf-8");
@@ -315,7 +332,10 @@ router.post("/:id/participants/upload", upload.single("file"), async (req, res) 
 
 router.post("/:id/publish", async (req, res) => {
   try {
-    const event = await Event.findById(req.params.id);
+    const event = await Event.findOne({
+      _id: req.params.id,
+      groupId: req.user.groupId,
+    });
     if (!event) return res.status(404).json({ ok: false, message: "Event not found" });
 
     // already closed
@@ -370,7 +390,10 @@ router.post("/:id/publish", async (req, res) => {
  */
 router.get("/:id", async (req, res) => {
   try {
-    const event = await Event.findById(req.params.id);
+    const event = await Event.findOne({
+    _id: req.params.id,
+    groupId: req.user.groupId,
+    });
     if (!event)
       return res.status(404).json({ ok: false, message: "Event not found" });
 
@@ -391,7 +414,10 @@ router.get("/:id", async (req, res) => {
 
 router.post("/:id/close", async (req, res) => {
   try {
-    const event = await Event.findById(req.params.id);
+        const event = await Event.findOne({
+      _id: req.params.id,
+      groupId: req.user.groupId,
+    });
     if (!event) return res.status(404).json({ ok: false, message: "Event not found" });
 
     // Only allow closing if it's currently OPEN

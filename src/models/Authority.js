@@ -6,6 +6,7 @@ const AuthoritySchema = new mongoose.Schema(
     name: { type: String },
     role: { type: String, enum: ["ADMIN", "AUTHORITY"], default: "AUTHORITY" },
     isActive: { type: Boolean, default: true },
+    groupId: { type: String, required: true, index: true },
   },
   { timestamps: true }
 );

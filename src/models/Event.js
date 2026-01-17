@@ -42,6 +42,7 @@ const EventSchema = new mongoose.Schema(
       ],
       default: [],
     },
+    groupId: { type: String, required: true, index: true },
   },
   { timestamps: true },
 );
