@@ -8,6 +8,7 @@ app.use(express.json());
 app.use("/auth", require("./routes/auth.routes"));
 app.use("/events", require("./routes/events.routes"));
 app.use("/students", require("./routes/students.routes"));
+app.use("/universities", require("./routes/universities.routes"));
 
 
 app.get("/health", (req, res) => {

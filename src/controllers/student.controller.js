@@ -1,4 +1,5 @@
 const Student = require("../models/Student");
+const University = require("../models/University");
 
 exports.syncStudent = async (req, res) => {
   try {
@@ -26,7 +27,7 @@ exports.syncStudent = async (req, res) => {
       !!student.uid &&
       !!student.email &&
       !!student.provider &&
-      !!student.collegeName; // this is the gate field
+      !!student.universityId;
 
     return res.status(200).json({
       studentId: student._id.toString(),
@@ -37,17 +38,17 @@ exports.syncStudent = async (req, res) => {
       photoUrl: student.photoUrl ?? null,
       provider: student.provider,
 
-      // 👇 A1 fields (profile completion fields)
+      universityId: student.universityId ? student.universityId.toString() : null,
+      universityName: student.universityName ?? null,
+
       collegeName: student.collegeName ?? null,
       course: student.course ?? null,
       year: student.year ?? null,
 
-      // 👇 timestamps (from mongoose)
       createdAt: student.createdAt,
       updatedAt: student.updatedAt,
       lastLoginAt: student.lastLoginAt,
 
-      // 👇 A2 flag
       isProfileComplete,
     });
   } catch (err) {
@@ -58,10 +59,14 @@ exports.syncStudent = async (req, res) => {
 
 exports.updateProfile = async (req, res) => {
   try {
-    const { uid, name, photoUrl, collegeName, course, year } = req.body;
+    const { uid, name, photoUrl, collegeName, course, year, universityId } = req.body;
 
-    if (!uid) {
-      return res.status(400).json({ message: "uid is required" });
+    let uni = null;
+    if (universityId) {
+      uni = await University.findById(universityId);
+      if (!uni) {
+        return res.status(400).json({ message: "Invalid universityId" });
+      }
     }
 
     const student = await Student.findOneAndUpdate(
@@ -73,6 +78,8 @@ exports.updateProfile = async (req, res) => {
           collegeName: collegeName ?? null,
           course: course ?? null,
           year: year ?? null,
+          universityId: uni ? uni._id : null,
+          universityName: uni ? uni.name : null,
           lastLoginAt: new Date()
         }
       },
@@ -87,7 +94,7 @@ exports.updateProfile = async (req, res) => {
       !!student.uid &&
       !!student.email &&
       !!student.provider &&
-      !!student.collegeName;
+      !!student.universityId;
 
     return res.status(200).json({
       studentId: student._id.toString(),
@@ -97,6 +104,9 @@ exports.updateProfile = async (req, res) => {
       name: student.name ?? null,
       photoUrl: student.photoUrl ?? null,
       provider: student.provider,
+
+      universityId: student.universityId ? student.universityId.toString() : null,
+      universityName: student.universityName ?? null,
 
       collegeName: student.collegeName ?? null,
       course: student.course ?? null,

@@ -13,6 +13,8 @@ const studentSchema = new mongoose.Schema(
     collegeName: { type: String },
     course: { type: String },
     year: { type: Number },
+    universityId: { type: mongoose.Schema.Types.ObjectId, ref: "University", default: null },
+    universityName: { type: String, default: null },
 
     lastLoginAt: { type: Date, default: Date.now }
   },
