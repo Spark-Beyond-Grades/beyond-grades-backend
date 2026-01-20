@@ -43,6 +43,14 @@ const EventSchema = new mongoose.Schema(
       default: [],
     },
     groupId: { type: String, required: true, index: true },
+    universityId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "University",
+      required: true,
+      index: true
+    },
+    universityName: { type: String, default: null } // optional cache
+
   },
   { timestamps: true },
 );

@@ -7,8 +7,45 @@ const { computeEffectiveStatus } = require("../utils/eventStatus");
 const multer = require("multer");
 const { parse } = require("csv-parse/sync");
 const Participant = require("../models/Participant");
+const Authority = require("../models/Authority");
+const Student = require("../models/Student");
 
 const upload = multer({ storage: multer.memoryStorage() });
+
+/**
+ * GET /events/feed?uid=FIREBASE_UID
+ * Student feed: returns published/open events for the student's university
+ */
+router.get("/feed", async (req, res) => {
+  try {
+    const { uid } = req.query;
+    if (!uid) return res.status(400).json({ ok: false, message: "uid is required" });
+
+    const student = await Student.findOne({ uid });
+    if (!student || !student.universityId) {
+      return res.status(400).json({ ok: false, message: "Student university not set" });
+    }
+
+    // Return only events of that university
+    const events = await Event.find({
+      universityId: student.universityId,
+      status: "PUBLISHED", // only published in feed
+    })
+      .sort({ createdAt: -1 })
+      .limit(50);
+
+    // include effectiveStatus (optional)
+    const mapped = events.map((e) => ({
+      ...e.toObject(),
+      effectiveStatus: computeEffectiveStatus(e),
+    }));
+
+    return res.json({ ok: true, items: mapped });
+  } catch (err) {
+    console.error("❌ GET /events/feed:", err.message);
+    return res.status(500).json({ ok: false, message: "Failed to fetch feed" });
+  }
+});
 
 // All routes below require allowlisted authority
 router.use(requireAuthority);
@@ -22,12 +59,24 @@ router.post("/", async (req, res) => {
   try {
     const { name = "", type = "OTHER", description = "" } = req.body || {};
 
+    // Find authority from logged-in email
+    const authority = await Authority.findOne({ email: req.user.email });
+    if (!authority) {
+      return res.status(403).json({ ok: false, message: "Not an authority" });
+    }
+
+    if (!authority.universityId) {
+      return res.status(400).json({ ok: false, message: "Authority university not set" });
+    }
+
     const event = await Event.create({
       name,
       type,
       description,
       createdByEmail: req.user.email,
       groupId: req.user.groupId,
+      universityId: authority.universityId,
+      universityName: authority.universityName ?? null, // optional cache
       status: "DRAFT",
     });
 
