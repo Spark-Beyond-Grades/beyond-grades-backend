@@ -1,0 +1,48 @@
+beyond-grades-backend/
+│
+├── src/
+│   │
+│   ├── app.js                  # Express app setup
+│   ├── server.js               # Server bootstrap (listen)
+│   │
+│   ├── api/                    # Empty for now
+│   │   ├── auth/
+│   │   ├── events/
+│   │   ├── feedback/
+│   │   ├── skills/
+│   │   ├── users/
+│   │
+│   ├── config/
+│   │   ├── db.js               # MongoDB connection
+│   │   ├── firebaseAdmin.js    # Firebase Admin SDK init
+│   │   ├── firebaseAdmin.json
+│   │
+│   ├── middleware/
+│   │   ├── requireAuthority.js # Authority-only access
+│   │
+│   ├── models/
+│   │   ├── Student.js
+│   │   ├── Authority.js
+│   │   ├── Event.js
+│   │   ├── Participant.js
+│   │   ├── University.js
+│   │
+│   ├── routes/
+│   │   ├── auth.routes.js
+│   │   ├── students.routes.js      # /students/*
+│   │   ├── universities.routes.js
+│   │   ├── events.routes.js         # /events/*
+│   │   ├── app.routes.js            # /app/version
+│   │
+│   ├── controllers/
+│   │   ├── students.controller.js
+│   │   ├── events.controller.js
+│   │   ├── auth.controller.js
+│   │   ├── universities.controller.js        # app version info
+│   │
+│   ├── utils/
+│       ├── eventStatus.js        # computeEffectiveStatus
+│
+├── package.json
+├── .env
+└── README.md
