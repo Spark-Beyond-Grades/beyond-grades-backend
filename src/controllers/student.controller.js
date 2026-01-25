@@ -1,5 +1,6 @@
 const Student = require("../models/Student");
 const University = require("../models/University");
+const Event = require("../models/Event");
 
 exports.syncStudent = async (req, res) => {
   try {
@@ -121,5 +122,22 @@ exports.updateProfile = async (req, res) => {
   } catch (err) {
     console.error("updateProfile error:", err);
     return res.status(500).json({ message: "Internal server error" });
+  }
+};
+
+exports.getEventDetail = async (req, res) => {
+  try {
+    const { eventId } = req.params;
+
+    const event = await Event.findById(eventId);
+
+    if (!event) {
+      return res.status(404).json({ ok: false, message: "Event not found" });
+    }
+
+    return res.status(200).json({ ok: true, item: event });
+  } catch (err) {
+    console.error("getEventDetail error:", err);
+    return res.status(500).json({ ok: false, message: "Internal server error" });
   }
 };
