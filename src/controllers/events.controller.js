@@ -38,7 +38,7 @@ exports.getStudentFeed = async (req, res) => {
 // POST /events
 exports.createDraftEvent = async (req, res) => {
   try {
-    const { name = "", type = "OTHER", description = "" } = req.body || {};
+    const { name = "", type = "OTHER", description = "", templateId = "T1", minAppBuild = 1 } = req.body || {};
 
     const authority = await Authority.findOne({ email: req.user.email });
     if (!authority) return res.status(403).json({ ok: false, message: "Not an authority" });
@@ -55,6 +55,8 @@ exports.createDraftEvent = async (req, res) => {
       groupId: req.user.groupId,
       universityId: authority.universityId,
       universityName: authority.universityName ?? null,
+      templateId,
+      minAppBuild,
       status: "DRAFT",
     });
 

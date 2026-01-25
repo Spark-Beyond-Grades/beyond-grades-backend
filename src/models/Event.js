@@ -49,7 +49,9 @@ const EventSchema = new mongoose.Schema(
       required: true,
       index: true
     },
-    universityName: { type: String, default: null } // optional cache
+    universityName: { type: String, default: null }, // optional cache
+    templateId: { type: String, default: "T1" }, // ex: T1..Tn
+    minAppBuild: { type: Number, default: 1 },   // minimum app versionCode required
 
   },
   { timestamps: true },
