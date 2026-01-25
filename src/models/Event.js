@@ -4,6 +4,7 @@ const EventSchema = new mongoose.Schema(
   {
     name: { type: String, trim: true, default: "" },
     description: { type: String, trim: true, default: "" },
+    posterUrl: { type: String, default: null },
     type: {
       type: String,
       enum: ["CLUB", "PROJECT", "FEST", "COMMITTEE", "OTHER"],
