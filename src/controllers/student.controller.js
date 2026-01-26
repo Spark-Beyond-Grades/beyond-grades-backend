@@ -1,4 +1,5 @@
 const Student = require("../models/Student");
+const Participant = require("../models/Participant");
 const University = require("../models/University");
 const Event = require("../models/Event");
 
@@ -128,14 +129,19 @@ exports.updateProfile = async (req, res) => {
 exports.getEventDetail = async (req, res) => {
   try {
     const { eventId } = req.params;
+    const studentEmail = req.user.email;
 
     const event = await Event.findById(eventId);
 
     if (!event) {
       return res.status(404).json({ ok: false, message: "Event not found" });
     }
+    const participant = await Participant.findOne({
+      eventId: event._id,
+      email: studentEmail,
+    });
 
-    return res.status(200).json({ ok: true, item: event });
+    return res.status(200).json({ ok: true, item: event,canGiveFeedback: !!participant });
   } catch (err) {
     console.error("getEventDetail error:", err);
     return res.status(500).json({ ok: false, message: "Internal server error" });
