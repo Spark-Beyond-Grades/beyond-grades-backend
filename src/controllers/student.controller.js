@@ -3,6 +3,8 @@ const Participant = require("../models/Participant");
 const University = require("../models/University");
 const FeedbackSubmission = require("../models/FeedbackSubmission");
 const Event = require("../models/Event");
+const { s3 } = require("../config/spaces");
+const sharp = require("sharp");
 
 exports.syncStudent = async (req, res) => {
   try {
@@ -12,25 +14,29 @@ exports.syncStudent = async (req, res) => {
       return res.status(400).json({ message: "uid and provider are required" });
     }
 
+    const setFields = {
+      email: email ?? null,
+      name: name ?? null,
+      provider,
+      lastLoginAt: new Date(),
+    };
+    // only update photoUrl if a real value is provided
+    if (photoUrl) setFields.photoUrl = photoUrl;
+
     const student = await Student.findOneAndUpdate(
       { uid },
-      {
-        $set: {
-          email: email ?? null,
-          name: name ?? null,
-          photoUrl: photoUrl ?? null,
-          provider,
-          lastLoginAt: new Date(),
-        },
-        $setOnInsert: { uid },
-      },
+      { $set: setFields, $setOnInsert: { uid } },
       { new: true, upsert: true }
     );
     const isProfileComplete =
       !!student.uid &&
       !!student.email &&
       !!student.provider &&
-      !!student.universityId;
+      !!student.universityId &&
+      !!(student.name && student.name.trim()) &&
+      !!(student.photoUrl && student.photoUrl.trim()) &&
+      !!student.dob &&
+      !!(student.phone && student.phone.trim());
 
     return res.status(200).json({
       studentId: student._id.toString(),
@@ -47,6 +53,10 @@ exports.syncStudent = async (req, res) => {
       collegeName: student.collegeName ?? null,
       course: student.course ?? null,
       year: student.year ?? null,
+
+      dob: student.dob ?? null,
+      phone: student.phone ?? null,
+      bio: student.bio ?? null,
 
       createdAt: student.createdAt,
       updatedAt: student.updatedAt,
@@ -62,44 +72,80 @@ exports.syncStudent = async (req, res) => {
 
 exports.updateProfile = async (req, res) => {
   try {
-    const { uid, name, photoUrl, collegeName, course, year, universityId } = req.body;
+    const uid = req.user.uid;
+    const email = req.user.email;
 
-    let uni = null;
-    if (universityId) {
-      uni = await University.findById(universityId);
-      if (!uni) {
-        return res.status(400).json({ message: "Invalid universityId" });
-      }
+    const { name, photoUrl, universityId, dob, phone, bio } = req.body;
+
+    // validate required
+    if (!name || !name.trim()) {
+      return res.status(400).json({ ok: false, message: "Name is required" });
     }
+
+    if (!universityId) {
+      return res.status(400).json({ ok: false, message: "University/College is required" });
+    }
+
+    if (!photoUrl || !photoUrl.trim()) {
+      return res.status(400).json({ ok: false, message: "Profile photo is required" });
+    }
+
+    if (!dob) {
+      return res.status(400).json({ ok: false, message: "Date of birth is required" });
+    }
+
+    const parsedDob = new Date(dob);
+    if (Number.isNaN(parsedDob.getTime())) {
+      return res.status(400).json({ ok: false, message: "Invalid dob format" });
+    }
+
+    const cleanedPhone = String(phone || "").trim();
+    if (!/^\d{10}$/.test(cleanedPhone)) {
+      return res.status(400).json({ ok: false, message: "Phone must be 10 digits" });
+    }
+
+    // validate universityId exists and also cache name
+    const uni = await University.findById(universityId);
+    if (!uni) {
+      return res.status(400).json({ ok: false, message: "Invalid universityId" });
+    }
+
+    const cleanedBio = bio ? String(bio).trim() : "";
 
     const student = await Student.findOneAndUpdate(
       { uid },
       {
         $set: {
-          name: name ?? null,
-          photoUrl: photoUrl ?? null,
-          collegeName: collegeName ?? null,
-          course: course ?? null,
-          year: year ?? null,
-          universityId: uni ? uni._id : null,
-          universityName: uni ? uni.name : null,
-          lastLoginAt: new Date()
-        }
+          email, // token = source of truth
+          name: name.trim(),
+          photoUrl: photoUrl.trim(),
+          universityId: uni._id,
+          universityName: uni.name,
+          dob: parsedDob,
+          phone: cleanedPhone,
+          bio: cleanedBio,
+          lastLoginAt: new Date(),
+        },
       },
       { new: true }
     );
 
     if (!student) {
-      return res.status(404).json({ message: "Student not found" });
+      return res.status(404).json({ ok: false, message: "Student not found" });
     }
 
     const isProfileComplete =
       !!student.uid &&
       !!student.email &&
       !!student.provider &&
-      !!student.universityId;
+      !!student.universityId &&
+      !!(student.name && student.name.trim()) &&
+      !!(student.photoUrl && student.photoUrl.trim()) &&
+      !!student.dob &&
+      !!(student.phone && student.phone.trim());
 
     return res.status(200).json({
+      ok: true,
       studentId: student._id.toString(),
 
       uid: student.uid,
@@ -111,19 +157,55 @@ exports.updateProfile = async (req, res) => {
       universityId: student.universityId ? student.universityId.toString() : null,
       universityName: student.universityName ?? null,
 
-      collegeName: student.collegeName ?? null,
-      course: student.course ?? null,
-      year: student.year ?? null,
+      dob: student.dob ?? null,
+      phone: student.phone ?? null,
+      bio: student.bio ?? null,
 
       createdAt: student.createdAt,
       updatedAt: student.updatedAt,
       lastLoginAt: student.lastLoginAt,
 
-      isProfileComplete
+      isProfileComplete,
     });
   } catch (err) {
     console.error("updateProfile error:", err);
-    return res.status(500).json({ message: "Internal server error" });
+    return res.status(500).json({ ok: false, message: "Internal server error" });
+  }
+};
+
+exports.uploadStudentPhoto = async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ ok: false, message: "photo file is required" });
+    }
+
+    const uid = req.user.uid;
+
+    // compress + resize (safe defaults)
+    const compressed = await sharp(req.file.buffer)
+      .resize(512, 512, { fit: "cover" })
+      .jpeg({ quality: 75 })
+      .toBuffer();
+
+    const key = `students/${uid}/${Date.now()}.jpg`;
+
+    await s3
+      .putObject({
+        Bucket: process.env.DO_SPACES_BUCKET,
+        Key: key,
+        Body: compressed,
+        ACL: "public-read",
+        ContentType: "image/jpeg",
+      })
+      .promise();
+
+    const base = process.env.DO_SPACES_CDN_BASE;
+    const photoUrl = `${base}/${key}`;
+
+    return res.status(200).json({ ok: true, photoUrl });
+  } catch (err) {
+    console.error("uploadStudentPhoto error:", err);
+    return res.status(500).json({ ok: false, message: "Photo upload failed" });
   }
 };
 

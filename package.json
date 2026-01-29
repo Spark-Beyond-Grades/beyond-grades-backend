@@ -12,6 +12,7 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
+    "aws-sdk": "^2.1693.0",
     "cors": "^2.8.5",
     "csv-parse": "^6.1.0",
     "dotenv": "^17.2.3",
@@ -19,7 +20,9 @@
     "firebase-admin": "^13.6.0",
     "mongoose": "^8.20.3",
     "multer": "^2.0.2",
-    "passport": "^0.7.0"
+    "multer-s3": "^3.0.1",
+    "passport": "^0.7.0",
+    "sharp": "^0.34.5"
   },
   "devDependencies": {
     "nodemon": "^3.1.11"
