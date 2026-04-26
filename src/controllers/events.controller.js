@@ -3,6 +3,7 @@ const Participant = require("../models/Participant");
 const Authority = require("../models/Authority");
 const Student = require("../models/Student");
 const { computeEffectiveStatus } = require("../utils/eventStatus");
+const { mapEventForStudentFeed } = require("../utils/eventFeed");
 const { parse } = require("csv-parse/sync");
 
 // GET /events/feed?uid=FIREBASE_UID
@@ -17,18 +18,15 @@ exports.getStudentFeed = async (req, res) => {
     }
 
     const events = await Event.find({
-      universityId: student.universityId,
       status: "PUBLISHED",
     })
       .sort({ createdAt: -1 })
       .limit(50);
 
-    const mapped = events.map((e) => ({
-      ...e.toObject(),
-      effectiveStatus: computeEffectiveStatus(e),
-    }));
+    const studentUniversityId = student.universityId.toString();
+    const mapped = events.map((e) => mapEventForStudentFeed(e, studentUniversityId));
 
-    return res.json({ ok: true, items: mapped });
+    return res.json({ ok: true, studentUniversityId, items: mapped });
   } catch (err) {
     console.error("❌ getStudentFeed:", err.message);
     return res.status(500).json({ ok: false, message: "Failed to fetch feed" });
