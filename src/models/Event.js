@@ -5,6 +5,8 @@ const EventSchema = new mongoose.Schema(
     name: { type: String, trim: true, default: "" },
     description: { type: String, trim: true, default: "" },
     posterUrl: { type: String, default: null },
+    eventDate: { type: Date, default: null },        // actual event date
+    venue: { type: String, trim: true, default: "" }, // event location / venue
     type: {
       type: String,
       enum: ["CLUB", "PROJECT", "FEST", "COMMITTEE", "OTHER"],
@@ -33,7 +35,7 @@ const EventSchema = new mongoose.Schema(
     // Step 3.3 - Team Structure
     levels: { type: [String], default: [] },
     skills: { type: [String], default: [] },
-    
+
     committees: {
       type: [
         {
@@ -58,4 +60,5 @@ const EventSchema = new mongoose.Schema(
   { timestamps: true },
 );
 
+module.exports = mongoose.model("Event", EventSchema);
 module.exports = mongoose.model("Event", EventSchema);

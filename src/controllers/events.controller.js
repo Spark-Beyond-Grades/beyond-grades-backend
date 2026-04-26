@@ -71,7 +71,10 @@ exports.createDraftEvent = async (req, res) => {
 // GET /events
 exports.listEvents = async (req, res) => {
   try {
-    const events = await Event.find({ groupId: req.user.groupId }).sort({ createdAt: -1 });
+    const events = await Event.find({
+      groupId: req.user.groupId,
+      status: "PUBLISHED",
+    }).sort({ createdAt: -1 });
 
     const mapped = events.map((e) => ({
       ...e.toObject(),
@@ -88,7 +91,7 @@ exports.listEvents = async (req, res) => {
 // PUT /events/:id
 exports.updateEvent = async (req, res) => {
   try {
-    const { name, type, description, openAt, closeAtTentative, levels, committees, skills } =
+    const { name, type, description, eventDate, venue, openAt, closeAtTentative, levels, committees, skills, posterUrl } =
       req.body || {};
 
     const event = await Event.findOne({ _id: req.params.id, groupId: req.user.groupId });
@@ -100,6 +103,8 @@ exports.updateEvent = async (req, res) => {
 
     if (typeof name === "string") event.name = name.trim();
     if (typeof description === "string") event.description = description.trim();
+    if (typeof venue === "string") event.venue = venue.trim();
+    if (eventDate !== undefined) event.eventDate = eventDate ? new Date(eventDate) : null;
 
     if (typeof type === "string") {
       const allowed = ["CLUB", "PROJECT", "FEST", "COMMITTEE", "OTHER"];
@@ -108,6 +113,8 @@ exports.updateEvent = async (req, res) => {
       }
       event.type = type;
     }
+
+    if (posterUrl !== undefined) event.posterUrl = posterUrl;
 
     if (openAt !== undefined) event.openAt = openAt ? new Date(openAt) : null;
     if (closeAtTentative !== undefined)
@@ -133,8 +140,8 @@ exports.updateEvent = async (req, res) => {
           const cname = typeof c?.name === "string" ? c.name.trim() : "";
           const allowedLevels = Array.isArray(c?.allowedLevels)
             ? c.allowedLevels
-                .map((l) => (typeof l === "string" ? l.trim() : ""))
-                .filter(Boolean)
+              .map((l) => (typeof l === "string" ? l.trim() : ""))
+              .filter(Boolean)
             : [];
           return { name: cname, allowedLevels };
         })
