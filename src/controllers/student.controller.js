@@ -250,9 +250,14 @@ exports.getEventTeam = async (req, res) => {
       .select("name email rollNumber committee level position")
       .lean();
 
+    const normalizedRaterEmail = raterEmail.toLowerCase().trim();
+    const visibleParticipants = participants.filter(
+      (p) => (p.email || "").toLowerCase().trim() !== normalizedRaterEmail
+    );
+
     const participantEmails = [
       ...new Set(
-        participants
+        visibleParticipants
           .map((p) => (p.email || "").toLowerCase().trim())
           .filter(Boolean)
       ),
@@ -299,13 +304,25 @@ exports.getEventTeam = async (req, res) => {
       raterEmail,
       submittedAt: { $ne: null },
     })
-      .select("targetEmail")
+      .select("targetEmail ratings")
       .lean();
 
-    const submittedTargets = new Set(submissions.map((s) => s.targetEmail));
+    const submissionsByTarget = new Map(
+      submissions.map((s) => [(s.targetEmail || "").toLowerCase().trim(), s])
+    );
+    const eventSkills = Array.isArray(event.skills) ? event.skills : [];
 
-    const items = participants.map((p) => {
+    const items = visibleParticipants.map((p) => {
       const student = studentsByEmail.get((p.email || "").toLowerCase().trim());
+      const submission = submissionsByTarget.get((p.email || "").toLowerCase().trim());
+      const ratings = Array.isArray(submission?.ratings) ? submission.ratings : [];
+      const completedSkills = new Set(
+        ratings
+          .filter((r) => !r.skipped && r.score !== null && r.score !== undefined)
+          .map((r) => r.skill)
+      );
+      const pendingSkills = eventSkills.filter((skill) => !completedSkills.has(skill));
+      const feedbackComplete = !!submission && eventSkills.length > 0 && pendingSkills.length === 0;
 
       return {
         name: p.name || "",
@@ -316,7 +333,9 @@ exports.getEventTeam = async (req, res) => {
         photoUrl: student?.photoUrl || "",
         bio: student?.bio || "",
         roleDescription: p.position || "",
-        feedbackGiven: submittedTargets.has(p.email),
+        feedbackGiven: feedbackComplete,
+        feedbackComplete,
+        pendingSkills,
       };
     });
 
@@ -406,10 +425,36 @@ exports.submitEventFeedback = async (req, res) => {
       raterEmail: raterEmail.toLowerCase().trim(),
       targetEmail: targetEmail.toLowerCase().trim(),
       submittedAt: { $ne: null },
-    }).lean();
+    });
 
     if (existing) {
-      return res.status(409).json({ ok: false, message: "Feedback already submitted" });
+      const completedSkills = new Set(
+        (existing.ratings || [])
+          .filter((r) => !r.skipped && r.score !== null && r.score !== undefined)
+          .map((r) => r.skill)
+      );
+      const hasPendingSkill = eventSkills.some((skill) => !completedSkills.has(skill));
+
+      if (!hasPendingSkill) {
+        return res.status(409).json({ ok: false, message: "Feedback already submitted" });
+      }
+
+      const ratingsBySkill = new Map((existing.ratings || []).map((r) => [r.skill, r]));
+      sanitized.forEach((rating) => {
+        ratingsBySkill.set(rating.skill, rating);
+      });
+
+      existing.ratings = eventSkills.map(
+        (skill) => ratingsBySkill.get(skill) || { skill, score: null, skipped: true, comment: null }
+      );
+      existing.submittedAt = new Date();
+      await existing.save();
+
+      return res.status(200).json({
+        ok: true,
+        submissionId: existing._id.toString(),
+        submittedAt: existing.submittedAt,
+      });
     }
 
     // Create submission (locked immediately for MVP)
