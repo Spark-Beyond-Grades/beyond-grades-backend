@@ -247,8 +247,51 @@ exports.getEventTeam = async (req, res) => {
 
     // Participants for this event
     const participants = await Participant.find({ eventId: event._id })
-      .select("name email rollNumber committee level")
+      .select("name email rollNumber committee level position")
       .lean();
+
+    const participantEmails = [
+      ...new Set(
+        participants
+          .map((p) => (p.email || "").toLowerCase().trim())
+          .filter(Boolean)
+      ),
+    ];
+
+    const students = participantEmails.length
+      ? await Student.aggregate([
+          {
+            $match: {
+              $expr: {
+                $in: [
+                  {
+                    $toLower: {
+                      $trim: {
+                        input: { $ifNull: ["$email", ""] },
+                      },
+                    },
+                  },
+                  participantEmails,
+                ],
+              },
+            },
+          },
+          {
+            $project: {
+              email: 1,
+              photoUrl: 1,
+              bio: 1,
+            },
+          },
+        ])
+      : [];
+
+    const studentsByEmail = new Map(
+      students.map((student) => [
+        (student.email || "").toLowerCase().trim(),
+        student,
+      ])
+    );
 
     // All feedback submissions by this rater for this event (fast)
     const submissions = await FeedbackSubmission.find({
@@ -261,14 +304,21 @@ exports.getEventTeam = async (req, res) => {
 
     const submittedTargets = new Set(submissions.map((s) => s.targetEmail));
 
-    const items = participants.map((p) => ({
-      name: p.name || "",
-      email: p.email || "",
-      rollNumber: p.rollNumber || "",
-      committee: p.committee || "",
-      level: p.level || "",
-      feedbackGiven: submittedTargets.has(p.email),
-    }));
+    const items = participants.map((p) => {
+      const student = studentsByEmail.get((p.email || "").toLowerCase().trim());
+
+      return {
+        name: p.name || "",
+        email: p.email || "",
+        rollNumber: p.rollNumber || "",
+        committee: p.committee || "",
+        level: p.level || "",
+        photoUrl: student?.photoUrl || "",
+        bio: student?.bio || "",
+        roleDescription: p.position || "",
+        feedbackGiven: submittedTargets.has(p.email),
+      };
+    });
 
     return res.status(200).json({
       ok: true,
