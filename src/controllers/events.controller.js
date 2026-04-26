@@ -3,6 +3,7 @@ const Participant = require("../models/Participant");
 const Authority = require("../models/Authority");
 const Student = require("../models/Student");
 const { computeEffectiveStatus } = require("../utils/eventStatus");
+const { mapEventForStudentFeed } = require("../utils/eventFeed");
 const { parse } = require("csv-parse/sync");
 
 // GET /events/feed?uid=FIREBASE_UID
@@ -17,18 +18,15 @@ exports.getStudentFeed = async (req, res) => {
     }
 
     const events = await Event.find({
-      universityId: student.universityId,
       status: "PUBLISHED",
     })
       .sort({ createdAt: -1 })
       .limit(50);
 
-    const mapped = events.map((e) => ({
-      ...e.toObject(),
-      effectiveStatus: computeEffectiveStatus(e),
-    }));
+    const studentUniversityId = student.universityId.toString();
+    const mapped = events.map((e) => mapEventForStudentFeed(e, studentUniversityId));
 
-    return res.json({ ok: true, items: mapped });
+    return res.json({ ok: true, studentUniversityId, items: mapped });
   } catch (err) {
     console.error("❌ getStudentFeed:", err.message);
     return res.status(500).json({ ok: false, message: "Failed to fetch feed" });
@@ -384,46 +382,5 @@ exports.closeEvent = async (req, res) => {
   } catch (err) {
     console.error("❌ closeEvent:", err.message);
     return res.status(500).json({ ok: false, message: "Failed to close event" });
-  }
-};
-
-const { uploadToSpaces } = require("../utils/uploadImage");
-
-// POST /events/:id/poster
-exports.uploadEventPoster = async (req, res) => {
-  try {
-    if (!req.file) {
-      return res.status(400).json({ ok: false, message: "No file uploaded" });
-    }
-
-    const event = await Event.findOne({
-      _id: req.params.id,
-      groupId: req.user.groupId,
-    });
-    if (!event) {
-      return res.status(404).json({ ok: false, message: "Event not found" });
-    }
-
-    // Upload to DO Spaces
-    const posterUrl = await uploadToSpaces(
-      req.file.buffer,
-      req.file.originalname,
-      "event-posters"
-    );
-
-    // Update event document
-    event.posterUrl = posterUrl;
-    await event.save();
-
-    return res.json({
-      ok: true,
-      message: "Poster uploaded successfully",
-      posterUrl,
-    });
-  } catch (err) {
-    console.error("❌ uploadEventPoster:", err.message);
-    return res
-      .status(500)
-      .json({ ok: false, message: "Failed to upload poster" });
   }
 };
