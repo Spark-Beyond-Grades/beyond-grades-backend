@@ -16,6 +16,8 @@ const {
   getEventById,
   closeEvent,
   uploadEventPoster,
+  uploadEventLogo,
+  getFeedbackSummary,
 } = require("../controllers/events.controller");
 
 // Public route
@@ -26,8 +28,13 @@ router.use(requireAuthority);
 
 router.post("/", createDraftEvent);
 router.get("/", listEvents);
+
+// ⚠️ Must be BEFORE /:id routes to avoid 'feedback-summary' being parsed as an ID
+router.get("/feedback-summary", getFeedbackSummary);
+
 router.put("/:id", updateEvent);
 router.post("/:id/poster", upload.single("poster"), uploadEventPoster);
+router.post("/:id/logo", upload.single("logo"), uploadEventLogo);
 
 router.get("/:id/participants", getParticipants);
 router.post("/:id/participants/upload", upload.single("file"), uploadParticipantsCsv);

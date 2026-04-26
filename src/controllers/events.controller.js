@@ -91,7 +91,7 @@ exports.listEvents = async (req, res) => {
 // PUT /events/:id
 exports.updateEvent = async (req, res) => {
   try {
-    const { name, type, description, eventDate, venue, openAt, closeAtTentative, levels, committees, skills, posterUrl } =
+    const { name, type, description, eventDate, venue, openAt, closeAtTentative, levels, committees, skills, posterUrl, logoUrl } =
       req.body || {};
 
     const event = await Event.findOne({ _id: req.params.id, groupId: req.user.groupId });
@@ -115,6 +115,7 @@ exports.updateEvent = async (req, res) => {
     }
 
     if (posterUrl !== undefined) event.posterUrl = posterUrl;
+    if (logoUrl !== undefined) event.logoUrl = logoUrl;
 
     if (openAt !== undefined) event.openAt = openAt ? new Date(openAt) : null;
     if (closeAtTentative !== undefined)
@@ -382,5 +383,164 @@ exports.closeEvent = async (req, res) => {
   } catch (err) {
     console.error("❌ closeEvent:", err.message);
     return res.status(500).json({ ok: false, message: "Failed to close event" });
+  }
+};
+
+const { uploadToSpaces } = require("../utils/uploadImage");
+const FeedbackSubmission = require("../models/FeedbackSubmission");
+
+// POST /events/:id/poster
+exports.uploadEventPoster = async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ ok: false, message: "No file uploaded" });
+    }
+
+    const event = await Event.findOne({
+      _id: req.params.id,
+      groupId: req.user.groupId,
+    });
+    if (!event) {
+      return res.status(404).json({ ok: false, message: "Event not found" });
+    }
+
+    // Upload to DO Spaces
+    const posterUrl = await uploadToSpaces(
+      req.file.buffer,
+      req.file.originalname,
+      "event-posters"
+    );
+
+    // Update event document
+    event.posterUrl = posterUrl;
+    await event.save();
+
+    return res.json({
+      ok: true,
+      message: "Poster uploaded successfully",
+      posterUrl,
+    });
+  } catch (err) {
+    console.error("❌ uploadEventPoster:", err.message);
+    return res
+      .status(500)
+      .json({ ok: false, message: "Failed to upload poster" });
+  }
+};
+
+// POST /events/:id/logo
+exports.uploadEventLogo = async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ ok: false, message: "No file uploaded" });
+    }
+
+    const event = await Event.findOne({
+      _id: req.params.id,
+      groupId: req.user.groupId,
+    });
+    if (!event) {
+      return res.status(404).json({ ok: false, message: "Event not found" });
+    }
+
+    // Upload to DO Spaces
+    const logoUrl = await uploadToSpaces(
+      req.file.buffer,
+      req.file.originalname,
+      "event-logos"
+    );
+
+    // Update event document
+    event.logoUrl = logoUrl;
+    await event.save();
+
+    return res.json({
+      ok: true,
+      message: "Logo uploaded successfully",
+      logoUrl,
+    });
+  } catch (err) {
+    console.error("❌ uploadEventLogo:", err.message);
+    return res
+      .status(500)
+      .json({ ok: false, message: "Failed to upload logo" });
+  }
+};
+
+// GET /events/feedback-summary
+exports.getFeedbackSummary = async (req, res) => {
+  try {
+    // Fetch all PUBLISHED or CLOSED events for this group
+    const events = await Event.find({
+      groupId: req.user.groupId,
+      status: { $in: ["PUBLISHED", "CLOSED"] },
+    }).sort({ createdAt: -1 });
+
+    const summaries = await Promise.all(
+      events.map(async (event) => {
+        const participants = await Participant.find({ eventId: event._id });
+        
+        // Build email -> name map for resolving target names
+        const emailToName = {};
+        participants.forEach(p => {
+          emailToName[p.email] = p.name || p.email;
+        });
+
+        // For each rater: count submissions AND collect who they rated
+        const submissionAgg = await FeedbackSubmission.aggregate([
+          { $match: { eventId: event._id, submittedAt: { $ne: null } } },
+          {
+            $group: {
+              _id: "$raterEmail",
+              submittedCount: { $sum: 1 },
+              ratedTargets: { $push: "$targetEmail" }
+            }
+          }
+        ]);
+
+        const submissionMap = {};
+        submissionAgg.forEach(s => {
+          submissionMap[s._id] = {
+            count: s.submittedCount,
+            targets: s.ratedTargets.map(email => ({ 
+              email, 
+              name: emailToName[email] || email 
+            }))
+          };
+        });
+
+        const enrichedParticipants = participants.map(p => {
+          const stats = submissionMap[p.email] || { count: 0, targets: [] };
+          const requiredCount = participants.length - 1; // everyone except themselves
+          
+          return {
+            ...p.toObject(),
+            submittedCount: stats.count,
+            requiredCount,
+            completionPct: requiredCount > 0 ? Math.round((stats.count / requiredCount) * 100) : 0,
+            isComplete: stats.count >= requiredCount && requiredCount > 0,
+            ratedTargets: stats.targets
+          };
+        });
+
+        const fullySubmittedCount = enrichedParticipants.filter(p => p.isComplete).length;
+
+        return {
+          event: { 
+            ...event.toObject(), 
+            effectiveStatus: computeEffectiveStatus(event) 
+          },
+          totalParticipants: participants.length,
+          fullySubmittedCount,
+          notStartedCount: enrichedParticipants.filter(p => p.submittedCount === 0).length,
+          participants: enrichedParticipants,
+        };
+      })
+    );
+
+    return res.json({ ok: true, summaries });
+  } catch (err) {
+    console.error("❌ getFeedbackSummary:", err.message);
+    return res.status(500).json({ ok: false, message: "Failed to fetch feedback summary" });
   }
 };

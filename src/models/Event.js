@@ -5,6 +5,7 @@ const EventSchema = new mongoose.Schema(
     name: { type: String, trim: true, default: "" },
     description: { type: String, trim: true, default: "" },
     posterUrl: { type: String, default: null },
+    logoUrl: { type: String, default: null },
     eventDate: { type: Date, default: null },        // actual event date
     venue: { type: String, trim: true, default: "" }, // event location / venue
     type: {
