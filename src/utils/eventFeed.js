@@ -6,6 +6,7 @@ function mapEventForStudentFeed(event, studentUniversityId) {
 
   return {
     ...eventObj,
+    eventDate: eventObj.eventStartDate || eventObj.eventDate, // Support new and old date fields
     effectiveStatus: computeEffectiveStatus(event),
     isUniversityEvent,
     feedScope: isUniversityEvent ? "UNIVERSITY" : "OUTSIDE",

@@ -91,7 +91,7 @@ exports.listEvents = async (req, res) => {
 // PUT /events/:id
 exports.updateEvent = async (req, res) => {
   try {
-    const { name, type, description, eventDate, venue, openAt, closeAtTentative, levels, committees, skills, posterUrl, logoUrl } =
+    const { name, type, description, eventStartDate, eventEndDate, venue, openAt, closeAtTentative, levels, committees, skills, posterUrl, logoUrl } =
       req.body || {};
 
     const event = await Event.findOne({ _id: req.params.id, groupId: req.user.groupId });
@@ -104,7 +104,11 @@ exports.updateEvent = async (req, res) => {
     if (typeof name === "string") event.name = name.trim();
     if (typeof description === "string") event.description = description.trim();
     if (typeof venue === "string") event.venue = venue.trim();
-    if (eventDate !== undefined) event.eventDate = eventDate ? new Date(eventDate) : null;
+    if (eventStartDate !== undefined) {
+      event.eventStartDate = eventStartDate ? new Date(eventStartDate) : null;
+      event.eventDate = event.eventStartDate; // Mirror to old field for database views
+    }
+    if (eventEndDate !== undefined) event.eventEndDate = eventEndDate ? new Date(eventEndDate) : null;
 
     if (typeof type === "string") {
       const allowed = ["CLUB", "PROJECT", "FEST", "COMMITTEE", "OTHER"];
@@ -470,7 +474,6 @@ exports.uploadEventLogo = async (req, res) => {
 // GET /events/feedback-summary
 exports.getFeedbackSummary = async (req, res) => {
   try {
-    // Fetch all PUBLISHED or CLOSED events for this group
     const events = await Event.find({
       groupId: req.user.groupId,
       status: { $in: ["PUBLISHED", "CLOSED"] },
@@ -479,14 +482,11 @@ exports.getFeedbackSummary = async (req, res) => {
     const summaries = await Promise.all(
       events.map(async (event) => {
         const participants = await Participant.find({ eventId: event._id });
-        
-        // Build email -> name map for resolving target names
         const emailToName = {};
         participants.forEach(p => {
           emailToName[p.email] = p.name || p.email;
         });
 
-        // For each rater: count submissions AND collect who they rated
         const submissionAgg = await FeedbackSubmission.aggregate([
           { $match: { eventId: event._id, submittedAt: { $ne: null } } },
           {
@@ -502,17 +502,17 @@ exports.getFeedbackSummary = async (req, res) => {
         submissionAgg.forEach(s => {
           submissionMap[s._id] = {
             count: s.submittedCount,
-            targets: s.ratedTargets.map(email => ({ 
-              email, 
-              name: emailToName[email] || email 
+            targets: s.ratedTargets.map(email => ({
+              email,
+              name: emailToName[email] || email
             }))
           };
         });
 
         const enrichedParticipants = participants.map(p => {
           const stats = submissionMap[p.email] || { count: 0, targets: [] };
-          const requiredCount = participants.length - 1; // everyone except themselves
-          
+          const requiredCount = participants.length - 1;
+
           return {
             ...p.toObject(),
             submittedCount: stats.count,
@@ -523,15 +523,13 @@ exports.getFeedbackSummary = async (req, res) => {
           };
         });
 
-        const fullySubmittedCount = enrichedParticipants.filter(p => p.isComplete).length;
-
         return {
-          event: { 
-            ...event.toObject(), 
-            effectiveStatus: computeEffectiveStatus(event) 
+          event: {
+            ...event.toObject(),
+            effectiveStatus: computeEffectiveStatus(event)
           },
           totalParticipants: participants.length,
-          fullySubmittedCount,
+          fullySubmittedCount: enrichedParticipants.filter(p => p.isComplete).length,
           notStartedCount: enrichedParticipants.filter(p => p.submittedCount === 0).length,
           participants: enrichedParticipants,
         };
@@ -542,5 +540,35 @@ exports.getFeedbackSummary = async (req, res) => {
   } catch (err) {
     console.error("❌ getFeedbackSummary:", err.message);
     return res.status(500).json({ ok: false, message: "Failed to fetch feedback summary" });
+  }
+};
+
+// GET /events/suggestions
+exports.getSuggestions = async (req, res) => {
+  try {
+    const groupId = req.user.groupId;
+
+    const levelsResult = await Event.aggregate([
+      { $match: { groupId } },
+      { $unwind: "$levels" },
+      { $group: { _id: "$levels" } },
+      { $limit: 30 }
+    ]);
+
+    const committeesResult = await Event.aggregate([
+      { $match: { groupId } },
+      { $unwind: "$committees" },
+      { $group: { _id: "$committees.name" } },
+      { $limit: 30 }
+    ]);
+
+    return res.json({
+      ok: true,
+      levels: levelsResult.map(r => r._id),
+      committees: committeesResult.map(r => r._id)
+    });
+  } catch (err) {
+    console.error("❌ getSuggestions:", err.message);
+    return res.status(500).json({ ok: false, message: "Failed to fetch suggestions" });
   }
 };

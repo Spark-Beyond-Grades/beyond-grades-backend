@@ -6,7 +6,9 @@ const EventSchema = new mongoose.Schema(
     description: { type: String, trim: true, default: "" },
     posterUrl: { type: String, default: null },
     logoUrl: { type: String, default: null },
-    eventDate: { type: Date, default: null },        // actual event date
+    eventStartDate: { type: Date, default: null },      // actual event start
+    eventEndDate: { type: Date, default: null },        // actual event end
+    eventDate: { type: Date, default: null },           // legacy field for compatibility
     venue: { type: String, trim: true, default: "" }, // event location / venue
     type: {
       type: String,

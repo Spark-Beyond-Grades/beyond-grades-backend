@@ -18,6 +18,7 @@ const {
   uploadEventPoster,
   uploadEventLogo,
   getFeedbackSummary,
+  getSuggestions,
 } = require("../controllers/events.controller");
 
 // Public route
@@ -28,6 +29,7 @@ router.use(requireAuthority);
 
 router.post("/", createDraftEvent);
 router.get("/", listEvents);
+router.get("/suggestions", getSuggestions);
 
 // ⚠️ Must be BEFORE /:id routes to avoid 'feedback-summary' being parsed as an ID
 router.get("/feedback-summary", getFeedbackSummary);
