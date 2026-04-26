@@ -15,6 +15,7 @@ const {
   publishEvent,
   getEventById,
   closeEvent,
+  uploadEventPoster,
 } = require("../controllers/events.controller");
 
 // Public route
@@ -26,6 +27,7 @@ router.use(requireAuthority);
 router.post("/", createDraftEvent);
 router.get("/", listEvents);
 router.put("/:id", updateEvent);
+router.post("/:id/poster", upload.single("poster"), uploadEventPoster);
 
 router.get("/:id/participants", getParticipants);
 router.post("/:id/participants/upload", upload.single("file"), uploadParticipantsCsv);
