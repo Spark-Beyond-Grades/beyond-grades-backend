@@ -17,6 +17,12 @@ function initFirebaseAdmin() {
 }
 
 function loadServiceAccount() {
+  if (process.env.FIREBASE_SERVICE_ACCOUNT_BASE64) {
+    return JSON.parse(
+      Buffer.from(process.env.FIREBASE_SERVICE_ACCOUNT_BASE64, "base64").toString("utf8")
+    );
+  }
+
   if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
     return JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
   }
@@ -39,8 +45,8 @@ function loadServiceAccount() {
   }
 
   throw new Error(
-    "Firebase credentials are missing. Set FIREBASE_SERVICE_ACCOUNT_JSON or FIREBASE_PROJECT_ID/FIREBASE_CLIENT_EMAIL/FIREBASE_PRIVATE_KEY."
+    "Firebase credentials are missing. Set FIREBASE_SERVICE_ACCOUNT_BASE64, FIREBASE_SERVICE_ACCOUNT_JSON, or FIREBASE_PROJECT_ID/FIREBASE_CLIENT_EMAIL/FIREBASE_PRIVATE_KEY."
   );
 }
 
-module.exports = { admin, initFirebaseAdmin };
+module.exports = { admin, initFirebaseAdmin, loadServiceAccount };
