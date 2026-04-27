@@ -2,6 +2,7 @@ const Event = require("../models/Event");
 const Participant = require("../models/Participant");
 const Authority = require("../models/Authority");
 const Student = require("../models/Student");
+const University = require("../models/University");
 const { computeEffectiveStatus } = require("../utils/eventStatus");
 const { mapEventForStudentFeed } = require("../utils/eventFeed");
 const { parse } = require("csv-parse/sync");
@@ -175,6 +176,18 @@ exports.updateEvent = async (req, res) => {
     }
 
     await event.save();
+
+    // If venue is provided, save it to the university's known venues
+    if (event.venue && event.universityId) {
+      try {
+        await University.updateOne(
+          { _id: event.universityId },
+          { $addToSet: { venues: event.venue } }
+        );
+      } catch (err) {
+        console.error("❌ Failed to update university venues:", err.message);
+      }
+    }
 
     return res.json({
       ok: true,
@@ -547,25 +560,36 @@ exports.getFeedbackSummary = async (req, res) => {
 exports.getSuggestions = async (req, res) => {
   try {
     const groupId = req.user.groupId;
+    const authority = await Authority.findOne({ email: req.user.email });
+    if (!authority) return res.status(403).json({ ok: false, message: "Not an authority" });
 
+
+    // Aggregate across ALL published/closed events to get global top suggestions
     const levelsResult = await Event.aggregate([
-      { $match: { groupId } },
+      { $match: { status: { $in: ["PUBLISHED", "CLOSED"] } } },
       { $unwind: "$levels" },
-      { $group: { _id: "$levels" } },
+      { $group: { _id: { $trim: { input: { $toLower: "$levels" } } }, originalName: { $first: "$levels" }, count: { $sum: 1 } } },
+      { $sort: { count: -1 } },
       { $limit: 30 }
     ]);
 
     const committeesResult = await Event.aggregate([
-      { $match: { groupId } },
+      { $match: { status: { $in: ["PUBLISHED", "CLOSED"] } } },
       { $unwind: "$committees" },
-      { $group: { _id: "$committees.name" } },
+      { $group: { _id: { $trim: { input: { $toLower: "$committees.name" } } }, originalName: { $first: "$committees.name" }, count: { $sum: 1 } } },
+      { $sort: { count: -1 } },
       { $limit: 30 }
     ]);
 
+    const universityData = await University.findOne({
+      _id: authority.universityId
+    }).select("venues");
+
     return res.json({
       ok: true,
-      levels: levelsResult.map(r => r._id),
-      committees: committeesResult.map(r => r._id)
+      levels: levelsResult.map(r => r.originalName).filter(Boolean),
+      committees: committeesResult.map(r => r.originalName).filter(Boolean),
+      venues: (universityData?.venues || []).slice(0, 30)
     });
   } catch (err) {
     console.error("❌ getSuggestions:", err.message);
