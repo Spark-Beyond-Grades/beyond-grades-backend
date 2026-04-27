@@ -2,7 +2,8 @@ const mongoose = require("mongoose");
 
 const universitySchema = new mongoose.Schema(
   {
-    name: { type: String, required: true, trim: true, unique: true }
+    name: { type: String, required: true, trim: true, unique: true },
+    venues: { type: [String], default: [] }
   },
   { timestamps: true }
 );
