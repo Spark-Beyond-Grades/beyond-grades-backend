@@ -8,7 +8,7 @@ const Student = require("../models/Student");
 
 process.env.DO_SPACES_ENDPOINT ||= "https://example.com";
 
-const { getEventTeam } = require("./student.controller");
+const { getEventDetail, getEventTeam, syncStudent } = require("./student.controller");
 
 function queryResult(rows) {
   return {
@@ -22,6 +22,7 @@ function queryResult(rows) {
 test("getEventTeam returns matched student photo, bio, and participant role description", async () => {
   const originals = {
     eventFindById: Event.findById,
+    participantFindOne: Participant.findOne,
     participantFind: Participant.find,
     studentAggregate: Student.aggregate,
     feedbackFind: FeedbackSubmission.find,
@@ -39,6 +40,12 @@ test("getEventTeam returns matched student photo, bio, and participant role desc
   try {
     Event.findById = () => ({
       lean: async () => event,
+    });
+
+    Participant.findOne = () => ({
+      lean: async () => ({
+        email: "rater@example.com",
+      }),
     });
 
     Participant.find = () =>
@@ -106,6 +113,7 @@ test("getEventTeam returns matched student photo, bio, and participant role desc
     ]);
   } finally {
     Event.findById = originals.eventFindById;
+    Participant.findOne = originals.participantFindOne;
     Participant.find = originals.participantFind;
     Student.aggregate = originals.studentAggregate;
     FeedbackSubmission.find = originals.feedbackFind;
@@ -115,6 +123,7 @@ test("getEventTeam returns matched student photo, bio, and participant role desc
 test("getEventTeam excludes the current rater and exposes pending skipped skills", async () => {
   const originals = {
     eventFindById: Event.findById,
+    participantFindOne: Participant.findOne,
     participantFind: Participant.find,
     studentAggregate: Student.aggregate,
     feedbackFind: FeedbackSubmission.find,
@@ -132,6 +141,12 @@ test("getEventTeam excludes the current rater and exposes pending skipped skills
   try {
     Event.findById = () => ({
       lean: async () => event,
+    });
+
+    Participant.findOne = () => ({
+      lean: async () => ({
+        email: "rater@example.com",
+      }),
     });
 
     Participant.find = () =>
@@ -194,8 +209,165 @@ test("getEventTeam excludes the current rater and exposes pending skipped skills
     assert.deepStrictEqual(res.body.items[0].pendingSkills, ["Leadership"]);
   } finally {
     Event.findById = originals.eventFindById;
+    Participant.findOne = originals.participantFindOne;
     Participant.find = originals.participantFind;
     Student.aggregate = originals.studentAggregate;
     FeedbackSubmission.find = originals.feedbackFind;
   }
 });
+
+test("syncStudent uses verified token identity instead of request body identity", async () => {
+  const originalFindOneAndUpdate = Student.findOneAndUpdate;
+
+  try {
+    Student.findOneAndUpdate = async (filter, update) => {
+      assert.deepStrictEqual(filter, { uid: "verified-uid" });
+      assert.strictEqual(update.$set.email, "verified@example.com");
+      assert.strictEqual(update.$set.name, "Verified User");
+      assert.strictEqual(update.$set.provider, "google.com");
+      assert.deepStrictEqual(update.$setOnInsert, { uid: "verified-uid" });
+
+      return {
+        _id: { toString: () => "student-id" },
+        uid: filter.uid,
+        email: update.$set.email,
+        name: update.$set.name,
+        photoUrl: "",
+        provider: update.$set.provider,
+        universityId: null,
+        universityName: null,
+        collegeName: null,
+        course: null,
+        year: null,
+        dob: null,
+        phone: "",
+        bio: "",
+        createdAt: new Date("2026-01-01T00:00:00.000Z"),
+        updatedAt: new Date("2026-01-01T00:00:00.000Z"),
+        lastLoginAt: update.$set.lastLoginAt,
+      };
+    };
+
+    const req = {
+      body: {
+        uid: "spoofed-uid",
+        email: "spoofed@example.com",
+        name: "Spoofed User",
+        provider: "password",
+      },
+      user: {
+        uid: "verified-uid",
+        email: "verified@example.com",
+        name: "Verified User",
+        provider: "google.com",
+      },
+    };
+    const res = createResponse();
+
+    await syncStudent(req, res);
+
+    assert.strictEqual(res.statusCode, 200);
+    assert.strictEqual(res.body.uid, "verified-uid");
+    assert.strictEqual(res.body.email, "verified@example.com");
+  } finally {
+    Student.findOneAndUpdate = originalFindOneAndUpdate;
+  }
+});
+
+test("getEventTeam rejects students who are not event participants", async () => {
+  const originals = {
+    eventFindById: Event.findById,
+    participantFindOne: Participant.findOne,
+    participantFind: Participant.find,
+    studentAggregate: Student.aggregate,
+    feedbackFind: FeedbackSubmission.find,
+  };
+
+  try {
+    Event.findById = () => ({
+      lean: async () => ({
+        _id: { toString: () => "64f000000000000000000001" },
+        name: "Launch Fest",
+        skills: ["Planning"],
+      }),
+    });
+    Participant.findOne = () => ({ lean: async () => null });
+    Participant.find = () => {
+      throw new Error("Participant list should not be queried for non-participants");
+    };
+    Student.aggregate = async () => {
+      throw new Error("Students should not be queried for non-participants");
+    };
+    FeedbackSubmission.find = () => {
+      throw new Error("Feedback should not be queried for non-participants");
+    };
+
+    const req = {
+      params: { eventId: "64f000000000000000000001" },
+      user: { email: "outsider@example.com" },
+    };
+    const res = createResponse();
+
+    await getEventTeam(req, res);
+
+    assert.strictEqual(res.statusCode, 403);
+    assert.deepStrictEqual(res.body, {
+      ok: false,
+      message: "Only event participants can view the event team",
+    });
+  } finally {
+    Event.findById = originals.eventFindById;
+    Participant.findOne = originals.participantFindOne;
+    Participant.find = originals.participantFind;
+    Student.aggregate = originals.studentAggregate;
+    FeedbackSubmission.find = originals.feedbackFind;
+  }
+});
+
+test("getEventDetail rejects students who are not event participants", async () => {
+  const originals = {
+    eventFindById: Event.findById,
+    participantFindOne: Participant.findOne,
+  };
+
+  try {
+    Event.findById = async () => ({
+      _id: { toString: () => "64f000000000000000000001" },
+      name: "Launch Fest",
+    });
+    Participant.findOne = async () => null;
+
+    const req = {
+      params: { eventId: "64f000000000000000000001" },
+      user: { email: "outsider@example.com" },
+    };
+    const res = createResponse();
+
+    await getEventDetail(req, res);
+
+    assert.strictEqual(res.statusCode, 403);
+    assert.deepStrictEqual(res.body, {
+      ok: false,
+      message: "Only event participants can view event details",
+    });
+  } finally {
+    Event.findById = originals.eventFindById;
+    Participant.findOne = originals.participantFindOne;
+  }
+});
+
+function createResponse() {
+  return {
+    statusCode: null,
+    body: null,
+    status(code) {
+      this.statusCode = code;
+      return this;
+    },
+    json(payload) {
+      this.statusCode ||= 200;
+      this.body = payload;
+      return this;
+    },
+  };
+}

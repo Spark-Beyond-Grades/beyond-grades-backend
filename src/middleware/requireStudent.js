@@ -27,6 +27,7 @@ async function requireStudent(req, res, next) {
       uid,
       email,
       name: decoded.name || decoded.displayName || "",
+      provider: decoded.firebase?.sign_in_provider || decoded.sign_in_provider || "firebase",
     };
 
     next();

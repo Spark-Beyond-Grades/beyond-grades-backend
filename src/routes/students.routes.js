@@ -4,7 +4,7 @@ const upload = require("../middleware/uploadPhoto");
 const { syncStudent,getEventDetail,uploadStudentPhoto , updateProfile, getEventTeam, submitEventFeedback } = require("../controllers/student.controller");
 
 // POST /students/sync
-router.post("/sync", syncStudent);
+router.post("/sync", requireStudent, syncStudent);
 
 // POST /students/profile
 router.post("/profile", requireStudent, updateProfile);

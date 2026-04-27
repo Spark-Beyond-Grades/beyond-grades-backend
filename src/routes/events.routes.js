@@ -2,8 +2,29 @@ const express = require("express");
 const router = express.Router();
 
 const requireAuthority = require("../middleware/requireAuthority");
+const requireStudent = require("../middleware/requireStudent");
 const multer = require("multer");
-const upload = multer({ storage: multer.memoryStorage() });
+const storage = multer.memoryStorage();
+const imageUpload = multer({
+  storage,
+  limits: { fileSize: 3 * 1024 * 1024 },
+  fileFilter(req, file, callback) {
+    if (!["image/jpeg", "image/png", "image/webp"].includes(file.mimetype)) {
+      return callback(new Error("Only JPEG, PNG, and WebP images are allowed"));
+    }
+    return callback(null, true);
+  },
+});
+const csvUpload = multer({
+  storage,
+  limits: { fileSize: 1 * 1024 * 1024 },
+  fileFilter(req, file, callback) {
+    if (!["text/csv", "application/vnd.ms-excel"].includes(file.mimetype)) {
+      return callback(new Error("Only CSV files are allowed"));
+    }
+    return callback(null, true);
+  },
+});
 
 const {
   getStudentFeed,
@@ -21,8 +42,8 @@ const {
   getSuggestions,
 } = require("../controllers/events.controller");
 
-// Public route
-router.get("/feed", getStudentFeed);
+// Student route
+router.get("/feed", requireStudent, getStudentFeed);
 
 // All routes below require allowlisted authority
 router.use(requireAuthority);
@@ -35,11 +56,11 @@ router.get("/suggestions", getSuggestions);
 router.get("/feedback-summary", getFeedbackSummary);
 
 router.put("/:id", updateEvent);
-router.post("/:id/poster", upload.single("poster"), uploadEventPoster);
-router.post("/:id/logo", upload.single("logo"), uploadEventLogo);
+router.post("/:id/poster", imageUpload.single("poster"), uploadEventPoster);
+router.post("/:id/logo", imageUpload.single("logo"), uploadEventLogo);
 
 router.get("/:id/participants", getParticipants);
-router.post("/:id/participants/upload", upload.single("file"), uploadParticipantsCsv);
+router.post("/:id/participants/upload", csvUpload.single("file"), uploadParticipantsCsv);
 
 router.post("/:id/publish", publishEvent);
 router.get("/:id", getEventById);

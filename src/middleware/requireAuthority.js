@@ -18,12 +18,11 @@ async function requireAuthority(req, res, next) {
     if (!email) return res.status(400).json({ ok: false, message: "No email in token" });
 
     const authority = await Authority.findOne({ email });
-    if (!authority.groupId) {
-      return res.status(403).json({ ok: false, message: "Authority groupId not set" });
-    }
-
     if (!authority || authority.isActive === false) {
       return res.status(403).json({ ok: false, message: "Access denied" });
+    }
+    if (!authority.groupId) {
+      return res.status(403).json({ ok: false, message: "Authority groupId not set" });
     }
 
     // attach useful info for routes

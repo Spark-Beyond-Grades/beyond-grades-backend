@@ -1,5 +1,6 @@
 const express = require("express");
 const router = express.Router();
+const requireStudent = require("../middleware/requireStudent");
 
 const {
   searchUniversities,
@@ -7,6 +8,6 @@ const {
 } = require("../controllers/universities.controller");
 
 router.get("/search", searchUniversities);
-router.post("/ensure", ensureUniversity);
+router.post("/ensure", requireStudent, ensureUniversity);
 
 module.exports = router;

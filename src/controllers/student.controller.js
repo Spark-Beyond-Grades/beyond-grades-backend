@@ -5,13 +5,18 @@ const FeedbackSubmission = require("../models/FeedbackSubmission");
 const Event = require("../models/Event");
 const { s3 } = require("../config/spaces");
 const sharp = require("sharp");
+const { PutObjectCommand } = require("@aws-sdk/client-s3");
 
 exports.syncStudent = async (req, res) => {
   try {
-    const { uid, email, name, photoUrl, provider } = req.body;
+    const uid = req.user?.uid;
+    const email = req.user?.email || null;
+    const name = req.user?.name || null;
+    const provider = req.user?.provider || "firebase";
+    const { photoUrl } = req.body || {};
 
-    if (!uid || !provider) {
-      return res.status(400).json({ message: "uid and provider are required" });
+    if (!uid) {
+      return res.status(400).json({ message: "uid is required" });
     }
 
     const setFields = {
@@ -189,15 +194,15 @@ exports.uploadStudentPhoto = async (req, res) => {
 
     const key = `students/${uid}/${Date.now()}.jpg`;
 
-    await s3
-      .putObject({
+    await s3.send(
+      new PutObjectCommand({
         Bucket: process.env.DO_SPACES_BUCKET,
         Key: key,
         Body: compressed,
         ACL: "public-read",
         ContentType: "image/jpeg",
       })
-      .promise();
+    );
 
     const base = process.env.DO_SPACES_CDN_BASE;
     const photoUrl = `${base}/${key}`;
@@ -212,7 +217,11 @@ exports.uploadStudentPhoto = async (req, res) => {
 exports.getEventDetail = async (req, res) => {
   try {
     const { eventId } = req.params;
-    const studentEmail = req.user.email;
+    const studentEmail = (req.user.email || "").toLowerCase().trim();
+
+    if (!studentEmail) {
+      return res.status(400).json({ ok: false, message: "No email in token" });
+    }
 
     const event = await Event.findById(eventId);
 
@@ -224,7 +233,14 @@ exports.getEventDetail = async (req, res) => {
       email: studentEmail,
     });
 
-    return res.status(200).json({ ok: true, item: event,canGiveFeedback: !!participant });
+    if (!participant) {
+      return res.status(403).json({
+        ok: false,
+        message: "Only event participants can view event details",
+      });
+    }
+
+    return res.status(200).json({ ok: true, item: event, canGiveFeedback: true });
   } catch (err) {
     console.error("getEventDetail error:", err);
     return res.status(500).json({ ok: false, message: "Internal server error" });
@@ -243,6 +259,18 @@ exports.getEventTeam = async (req, res) => {
     const event = await Event.findById(eventId).lean();
     if (!event) {
       return res.status(404).json({ ok: false, message: "Event not found" });
+    }
+
+    const raterParticipant = await Participant.findOne({
+      eventId: event._id,
+      email: raterEmail.toLowerCase().trim(),
+    }).lean();
+
+    if (!raterParticipant) {
+      return res.status(403).json({
+        ok: false,
+        message: "Only event participants can view the event team",
+      });
     }
 
     // Participants for this event
@@ -374,6 +402,15 @@ exports.submitEventFeedback = async (req, res) => {
     const event = await Event.findById(eventId).lean();
     if (!event) {
       return res.status(404).json({ ok: false, message: "Event not found" });
+    }
+
+    const raterParticipant = await Participant.findOne({
+      eventId: event._id,
+      email: raterEmail.toLowerCase().trim(),
+    }).lean();
+
+    if (!raterParticipant) {
+      return res.status(403).json({ ok: false, message: "Only event participants can submit feedback" });
     }
 
     const eventSkills = Array.isArray(event.skills) ? event.skills : [];

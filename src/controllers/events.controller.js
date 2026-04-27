@@ -9,7 +9,7 @@ const { parse } = require("csv-parse/sync");
 // GET /events/feed?uid=FIREBASE_UID
 exports.getStudentFeed = async (req, res) => {
   try {
-    const { uid } = req.query;
+    const uid = req.user?.uid;
     if (!uid) return res.status(400).json({ ok: false, message: "uid is required" });
 
     const student = await Student.findOne({ uid });

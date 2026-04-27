@@ -1,5 +1,6 @@
 const { s3 } = require("../config/spaces");
 const crypto = require("crypto");
+const { Upload } = require("@aws-sdk/lib-storage");
 
 /**
  * Uploads a buffer to DigitalOcean Spaces.
@@ -9,7 +10,7 @@ const crypto = require("crypto");
  * @returns {Promise<string>} - The URL of the uploaded image.
  */
 async function uploadToSpaces(buffer, fileName, folder = "general") {
-  const fileExtension = fileName.split(".").pop();
+  const fileExtension = fileName.split(".").pop().toLowerCase();
   const randomName = crypto.randomBytes(16).toString("hex");
   const key = `${folder}/${randomName}.${fileExtension}`;
 
@@ -21,7 +22,10 @@ async function uploadToSpaces(buffer, fileName, folder = "general") {
     ContentType: `image/${fileExtension === "jpg" ? "jpeg" : fileExtension}`,
   };
 
-  const uploadResult = await s3.upload(params).promise();
+  const uploadResult = await new Upload({
+    client: s3,
+    params,
+  }).done();
   
   if (process.env.DO_SPACES_CDN_BASE) {
     return `${process.env.DO_SPACES_CDN_BASE}/${key}`;
