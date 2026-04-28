@@ -569,7 +569,9 @@ exports.uploadEventPoster = async (req, res) => {
     const posterUrl = await uploadToSpaces(
       req.file.buffer,
       req.file.originalname,
-      "event-posters"
+      "event-posters",
+      595,
+      842
     );
 
     // Update event document
@@ -608,7 +610,9 @@ exports.uploadEventLogo = async (req, res) => {
     const logoUrl = await uploadToSpaces(
       req.file.buffer,
       req.file.originalname,
-      "event-logos"
+      "event-logos",
+      512,
+      512
     );
 
     // Update event document
