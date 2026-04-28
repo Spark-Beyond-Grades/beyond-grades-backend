@@ -3,9 +3,17 @@ const Participant = require("../models/Participant");
 const Authority = require("../models/Authority");
 const Student = require("../models/Student");
 const University = require("../models/University");
+const mongoose = require("mongoose");
 const { computeEffectiveStatus } = require("../utils/eventStatus");
 const { mapEventForStudentFeed } = require("../utils/eventFeed");
 const { parse } = require("csv-parse/sync");
+
+const STUDENT_FEED_DEFAULT_LIMIT = 20;
+const STUDENT_FEED_COMPAT_LIMIT = 50;
+const STUDENT_FEED_MAX_LIMIT = 50;
+const STUDENT_FEED_FILTERS = new Set(["RELEVANT", "UNIVERSITY", "OUTSIDE"]);
+const STUDENT_FEED_SEARCH_INDEX = "events_search";
+const STUDENT_FEED_SEARCH_PATHS = ["name", "description", "venue", "type", "universityName", "skills"];
 
 // GET /events/feed?uid=FIREBASE_UID
 exports.getStudentFeed = async (req, res) => {
@@ -18,21 +26,157 @@ exports.getStudentFeed = async (req, res) => {
       return res.status(400).json({ ok: false, message: "Student university not set" });
     }
 
-    const events = await Event.find({
-      status: "PUBLISHED",
-    })
-      .sort({ createdAt: -1 })
-      .limit(50);
-
     const studentUniversityId = student.universityId.toString();
-    const mapped = events.map((e) => mapEventForStudentFeed(e, studentUniversityId));
+    const feedOptions = parseStudentFeedOptions(req.query || {});
+    if (feedOptions.error) {
+      return res.status(400).json({ ok: false, message: feedOptions.error });
+    }
 
-    return res.json({ ok: true, studentUniversityId, items: mapped });
+    const events = await fetchStudentFeedEvents(feedOptions, studentUniversityId);
+    const pageEvents = events.slice(0, feedOptions.limit);
+    const mapped = pageEvents.map((e) => mapEventForStudentFeed(e, studentUniversityId));
+    const hasMore = events.length > feedOptions.limit;
+    const lastItem = pageEvents[pageEvents.length - 1];
+    const nextCursor = hasMore && lastItem ? encodeStudentFeedCursor(lastItem) : null;
+
+    return res.json({ ok: true, studentUniversityId, items: mapped, nextCursor, hasMore });
   } catch (err) {
     console.error("❌ getStudentFeed:", err.message);
     return res.status(500).json({ ok: false, message: "Failed to fetch feed" });
   }
 };
+
+function parseStudentFeedOptions(query) {
+  const hasNewFeedParams = ["limit", "cursor", "q", "filter"].some((param) => query[param] !== undefined);
+  const requestedLimit = Number(query.limit);
+  const limit = hasNewFeedParams
+    ? Math.min(Number.isFinite(requestedLimit) && requestedLimit > 0 ? requestedLimit : STUDENT_FEED_DEFAULT_LIMIT, STUDENT_FEED_MAX_LIMIT)
+    : STUDENT_FEED_COMPAT_LIMIT;
+  const filter = String(query.filter || "RELEVANT").toUpperCase();
+  if (!STUDENT_FEED_FILTERS.has(filter)) {
+    return { error: "Invalid filter" };
+  }
+
+  let cursor = null;
+  if (query.cursor) {
+    cursor = decodeStudentFeedCursor(query.cursor);
+    if (!cursor) {
+      return { error: "Invalid cursor" };
+    }
+  }
+
+  return {
+    limit,
+    cursor,
+    q: typeof query.q === "string" ? query.q.trim() : "",
+    filter,
+  };
+}
+
+function decodeStudentFeedCursor(cursor) {
+  try {
+    const parsed = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
+    const createdAt = new Date(parsed.createdAt);
+    if (!parsed.id || Number.isNaN(createdAt.getTime())) return null;
+    return { createdAt, id: parsed.id };
+  } catch {
+    return null;
+  }
+}
+
+function encodeStudentFeedCursor(event) {
+  const eventObj = event.toObject ? event.toObject() : event;
+  return Buffer.from(
+    JSON.stringify({
+      createdAt: new Date(eventObj.createdAt).toISOString(),
+      id: eventObj._id.toString(),
+    }),
+  ).toString("base64url");
+}
+
+function buildStudentFeedFilter(filter, studentUniversityId) {
+  const criteria = { status: "PUBLISHED" };
+  const universityId = toMongoObjectId(studentUniversityId);
+  if (filter === "UNIVERSITY") {
+    criteria.universityId = universityId;
+  }
+  if (filter === "OUTSIDE") {
+    criteria.universityId = { $ne: universityId };
+  }
+  return criteria;
+}
+
+function toMongoObjectId(value) {
+  const stringValue = value.toString();
+  return mongoose.Types.ObjectId.isValid(stringValue) ? new mongoose.Types.ObjectId(stringValue) : stringValue;
+}
+
+function buildCursorCriteria(cursor) {
+  if (!cursor) return null;
+  return {
+    $or: [
+      { createdAt: { $lt: cursor.createdAt } },
+      {
+        createdAt: cursor.createdAt,
+        _id: { $lt: cursor.id },
+      },
+    ],
+  };
+}
+
+async function fetchStudentFeedEvents(options, studentUniversityId) {
+  const cursorCriteria = buildCursorCriteria(options.cursor);
+  if (options.q) {
+    const pipeline = [
+      {
+        $search: {
+          index: STUDENT_FEED_SEARCH_INDEX,
+          compound: {
+            must: [
+              {
+                text: {
+                  query: options.q,
+                  path: STUDENT_FEED_SEARCH_PATHS,
+                  fuzzy: {
+                    maxEdits: 2,
+                    prefixLength: 1,
+                  },
+                },
+              },
+            ],
+            filter: [
+              {
+                equals: { path: "status", value: "PUBLISHED" },
+              },
+            ],
+          },
+        },
+      },
+    ];
+
+    const mobileFilter = buildStudentFeedFilter(options.filter, studentUniversityId);
+    delete mobileFilter.status;
+    if (Object.keys(mobileFilter).length > 0) {
+      pipeline.push({ $match: mobileFilter });
+    }
+    if (cursorCriteria) {
+      pipeline.push({ $match: cursorCriteria });
+    }
+    pipeline.push({ $sort: { createdAt: -1, _id: -1 } });
+    pipeline.push({ $limit: options.limit + 1 });
+
+    return Event.aggregate(pipeline);
+  }
+
+  const filter = buildStudentFeedFilter(options.filter, studentUniversityId);
+  if (cursorCriteria) {
+    Object.assign(filter, cursorCriteria);
+  }
+
+  return Event.find(filter)
+    .sort({ createdAt: -1, _id: -1 })
+    .limit(options.limit + 1);
+}
 
 // POST /events
 exports.createDraftEvent = async (req, res) => {
