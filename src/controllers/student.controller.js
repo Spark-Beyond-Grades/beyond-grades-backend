@@ -5,7 +5,7 @@ const FeedbackSubmission = require("../models/FeedbackSubmission");
 const Event = require("../models/Event");
 const { s3 } = require("../config/spaces");
 const sharp = require("sharp");
-const { PutObjectCommand } = require("@aws-sdk/client-s3");
+const { PutObjectCommand, DeleteObjectCommand } = require("@aws-sdk/client-s3");
 
 exports.syncStudent = async (req, res) => {
   try {
@@ -185,6 +185,8 @@ exports.uploadStudentPhoto = async (req, res) => {
     }
 
     const uid = req.user.uid;
+    const cdnBase = process.env.DO_SPACES_CDN_BASE;
+    const bucket = process.env.DO_SPACES_BUCKET;
 
     // compress + resize (safe defaults)
     const compressed = await sharp(req.file.buffer)
@@ -194,9 +196,10 @@ exports.uploadStudentPhoto = async (req, res) => {
 
     const key = `students/${uid}/${Date.now()}.jpg`;
 
+    // ── 1. Upload the NEW photo first ──
     await s3.send(
       new PutObjectCommand({
-        Bucket: process.env.DO_SPACES_BUCKET,
+        Bucket: bucket,
         Key: key,
         Body: compressed,
         ACL: "public-read",
@@ -204,8 +207,23 @@ exports.uploadStudentPhoto = async (req, res) => {
       })
     );
 
-    const base = process.env.DO_SPACES_CDN_BASE;
-    const photoUrl = `${base}/${key}`;
+    const photoUrl = `${cdnBase}/${key}`;
+
+    // ── 2. Grab old URL and persist the new one to DB ──
+    const student = await Student.findOneAndUpdate(
+      { uid },
+      { $set: { photoUrl } },
+      { projection: { photoUrl: 1 }, returnDocument: "before" }
+    ).lean();
+
+    // ── 3. NOW it's safe to delete the old photo (if it's ours) ──
+    const oldUrl = student?.photoUrl;
+    if (oldUrl && cdnBase && oldUrl.startsWith(cdnBase)) {
+      const oldKey = oldUrl.replace(`${cdnBase}/`, "");
+      s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: oldKey })).catch((err) =>
+        console.warn("Failed to delete old photo:", err.message)
+      );
+    }
 
     return res.status(200).json({ ok: true, photoUrl });
   } catch (err) {
