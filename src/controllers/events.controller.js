@@ -466,25 +466,11 @@ exports.publishEvent = async (req, res) => {
       return res.status(400).json({ ok: false, message: "Event name is required before publish" });
     }
 
-    if (!event.openAt || !event.closeAtTentative) {
-      return res.status(400).json({
-        ok: false,
-        message: "Feedback window (open/close) is required before publish",
-      });
-    }
-
-    if (new Date(event.openAt) >= new Date(event.closeAtTentative)) {
+    if (event.openAt && event.closeAtTentative && new Date(event.openAt) >= new Date(event.closeAtTentative)) {
       return res.status(400).json({ ok: false, message: "Invalid feedback window: open must be before close" });
     }
 
-    if (!Array.isArray(event.skills) || event.skills.length === 0) {
-      return res.status(400).json({ ok: false, message: "At least 1 skill is required before publish" });
-    }
-
     const participantsCount = await Participant.countDocuments({ eventId: event._id });
-    if (participantsCount === 0) {
-      return res.status(400).json({ ok: false, message: "At least 1 participant is required before publish" });
-    }
 
     event.status = "PUBLISHED";
     await event.save();

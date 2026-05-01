@@ -5,9 +5,10 @@ const mongoose = require("mongoose");
 process.env.DO_SPACES_ENDPOINT ||= "https://example.com";
 
 const Event = require("../models/Event");
+const Participant = require("../models/Participant");
 const Student = require("../models/Student");
 
-const { getStudentFeed, listEvents } = require("./events.controller");
+const { getStudentFeed, listEvents, publishEvent } = require("./events.controller");
 
 const HOME_UNIVERSITY_ID = "64f000000000000000000001";
 const OUTSIDE_UNIVERSITY_ID = "64f000000000000000000002";
@@ -327,6 +328,70 @@ test("getStudentFeed rejects invalid cursors", async () => {
     assert.match(res.body.message, /Invalid cursor/);
   } finally {
     Student.findOne = originals.studentFindOne;
+  }
+});
+
+test("publishEvent allows event-only publishing without feedback setup", async () => {
+  const originals = {
+    eventFindOne: Event.findOne,
+    participantCountDocuments: Participant.countDocuments,
+  };
+
+  try {
+    const draft = {
+      _id: new mongoose.Types.ObjectId("64f000000000000000000031"),
+      name: "Guest Lecture",
+      status: "DRAFT",
+      closeAtActual: null,
+      openAt: null,
+      closeAtTentative: null,
+      skills: [],
+      saveCalled: false,
+      async save() {
+        this.saveCalled = true;
+      },
+      toObject() {
+        return {
+          _id: this._id,
+          name: this.name,
+          status: this.status,
+          openAt: this.openAt,
+          closeAtTentative: this.closeAtTentative,
+          skills: this.skills,
+        };
+      },
+    };
+
+    Event.findOne = async (filter) => {
+      assert.deepStrictEqual(filter, {
+        _id: "64f000000000000000000031",
+        groupId: "authority-group",
+      });
+      return draft;
+    };
+    Participant.countDocuments = async (filter) => {
+      assert.deepStrictEqual(filter, { eventId: draft._id });
+      return 0;
+    };
+
+    const res = createResponse();
+
+    await publishEvent(
+      {
+        params: { id: "64f000000000000000000031" },
+        user: { groupId: "authority-group" },
+      },
+      res,
+    );
+
+    assert.strictEqual(res.statusCode, 200);
+    assert.strictEqual(res.body.ok, true);
+    assert.strictEqual(res.body.event.status, "PUBLISHED");
+    assert.strictEqual(res.body.event.participantsCount, 0);
+    assert.strictEqual(draft.saveCalled, true);
+  } finally {
+    Event.findOne = originals.eventFindOne;
+    Participant.countDocuments = originals.participantCountDocuments;
   }
 });
 
