@@ -3,15 +3,18 @@ function computeEffectiveStatus(event, now = new Date()) {
   if (event.status === "DRAFT") return "DRAFT";
   if (event.status === "CLOSED" || event.closeAtActual) return "CLOSED";
 
-  // published but missing dates (should be prevented by publish validation later)
-  if (!event.openAt || !event.closeAtTentative) return "SCHEDULED";
+  const eventStart = event.eventStartDate || event.eventDate;
+  const eventEnd = event.eventEndDate || event.eventDate;
 
-  const openAt = new Date(event.openAt);
-  const closeAt = new Date(event.closeAtTentative);
+  if (!eventStart) return "PUBLISHED";
 
-  if (now < openAt) return "SCHEDULED";
-  if (now >= openAt && now <= closeAt) return "OPEN";
-  return "CLOSED";
+  const startAt = new Date(eventStart);
+  const endAt = eventEnd ? new Date(eventEnd) : null;
+
+  if (now < startAt) return "SCHEDULED";
+  if (endAt && now > endAt) return "CLOSED";
+  if (endAt) return "OPEN";
+  return "PUBLISHED";
 }
 
 module.exports = { computeEffectiveStatus };

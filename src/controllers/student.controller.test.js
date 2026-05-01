@@ -324,7 +324,7 @@ test("getEventTeam rejects students who are not event participants", async () =>
   }
 });
 
-test("getEventDetail rejects students who are not event participants", async () => {
+test("getEventDetail loads published event details for students who are not participants", async () => {
   const originals = {
     eventFindById: Event.findById,
     participantFindOne: Participant.findOne,
@@ -334,6 +334,18 @@ test("getEventDetail rejects students who are not event participants", async () 
     Event.findById = async () => ({
       _id: { toString: () => "64f000000000000000000001" },
       name: "Launch Fest",
+      status: "PUBLISHED",
+      eventStartDate: new Date("2026-05-10T10:00:00.000Z"),
+      eventEndDate: new Date("2026-05-11T10:00:00.000Z"),
+      toObject() {
+        return {
+          _id: this._id,
+          name: this.name,
+          status: this.status,
+          eventStartDate: this.eventStartDate,
+          eventEndDate: this.eventEndDate,
+        };
+      },
     });
     Participant.findOne = async () => null;
 
@@ -345,11 +357,11 @@ test("getEventDetail rejects students who are not event participants", async () 
 
     await getEventDetail(req, res);
 
-    assert.strictEqual(res.statusCode, 403);
-    assert.deepStrictEqual(res.body, {
-      ok: false,
-      message: "Only event participants can view event details",
-    });
+    assert.strictEqual(res.statusCode, 200);
+    assert.strictEqual(res.body.ok, true);
+    assert.strictEqual(res.body.canGiveFeedback, false);
+    assert.strictEqual(res.body.item.name, "Launch Fest");
+    assert.strictEqual(res.body.item.effectiveStatus, "SCHEDULED");
   } finally {
     Event.findById = originals.eventFindById;
     Participant.findOne = originals.participantFindOne;

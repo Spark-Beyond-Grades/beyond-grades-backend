@@ -3,6 +3,7 @@ const Participant = require("../models/Participant");
 const University = require("../models/University");
 const FeedbackSubmission = require("../models/FeedbackSubmission");
 const Event = require("../models/Event");
+const { computeEffectiveStatus } = require("../utils/eventStatus");
 const { s3 } = require("../config/spaces");
 const sharp = require("sharp");
 const { PutObjectCommand, DeleteObjectCommand } = require("@aws-sdk/client-s3");
@@ -251,14 +252,17 @@ exports.getEventDetail = async (req, res) => {
       email: studentEmail,
     });
 
-    if (!participant) {
-      return res.status(403).json({
-        ok: false,
-        message: "Only event participants can view event details",
-      });
-    }
+    const canGiveFeedback = !!participant;
+    const eventObject = event.toObject ? event.toObject() : event;
 
-    return res.status(200).json({ ok: true, item: event, canGiveFeedback: true });
+    return res.status(200).json({
+      ok: true,
+      item: {
+        ...eventObject,
+        effectiveStatus: computeEffectiveStatus(event),
+      },
+      canGiveFeedback,
+    });
   } catch (err) {
     console.error("getEventDetail error:", err);
     return res.status(500).json({ ok: false, message: "Internal server error" });

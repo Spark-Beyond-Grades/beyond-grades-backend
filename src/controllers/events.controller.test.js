@@ -41,7 +41,7 @@ test("listEvents returns draft and published authority events for the group", as
       res.body.events.map((event) => [event.name, event.status, event.effectiveStatus]),
       [
         ["Draft setup", "DRAFT", "DRAFT"],
-        ["Live event", "PUBLISHED", "OPEN"],
+        ["Live event", "PUBLISHED", "PUBLISHED"],
       ],
     );
   } finally {
