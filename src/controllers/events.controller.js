@@ -218,7 +218,6 @@ exports.listEvents = async (req, res) => {
   try {
     const events = await Event.find({
       groupId: req.user.groupId,
-      status: "PUBLISHED",
     }).sort({ createdAt: -1 });
 
     const mapped = events.map((e) => ({

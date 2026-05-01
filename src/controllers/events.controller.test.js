@@ -7,10 +7,46 @@ process.env.DO_SPACES_ENDPOINT ||= "https://example.com";
 const Event = require("../models/Event");
 const Student = require("../models/Student");
 
-const { getStudentFeed } = require("./events.controller");
+const { getStudentFeed, listEvents } = require("./events.controller");
 
 const HOME_UNIVERSITY_ID = "64f000000000000000000001";
 const OUTSIDE_UNIVERSITY_ID = "64f000000000000000000002";
+
+test("listEvents returns draft and published authority events for the group", async () => {
+  const originalEventFind = Event.find;
+
+  try {
+    const rows = [
+      authorityEventRecord("64f000000000000000000021", "Draft setup", "DRAFT"),
+      authorityEventRecord("64f000000000000000000022", "Live event", "PUBLISHED"),
+    ];
+
+    Event.find = (filter) => {
+      assert.deepStrictEqual(filter, { groupId: "authority-group" });
+      return {
+        sort(sort) {
+          assert.deepStrictEqual(sort, { createdAt: -1 });
+          return rows;
+        },
+      };
+    };
+
+    const res = createResponse();
+
+    await listEvents({ user: { groupId: "authority-group" } }, res);
+
+    assert.strictEqual(res.statusCode, 200);
+    assert.deepStrictEqual(
+      res.body.events.map((event) => [event.name, event.status, event.effectiveStatus]),
+      [
+        ["Draft setup", "DRAFT", "DRAFT"],
+        ["Live event", "PUBLISHED", "OPEN"],
+      ],
+    );
+  } finally {
+    Event.find = originalEventFind;
+  }
+});
 
 test("getStudentFeed uses verified user uid instead of query uid", async () => {
   const originals = {
@@ -336,6 +372,27 @@ function eventRecord(id, name, createdAt, universityId) {
         status: this.status,
         createdAt: this.createdAt,
         universityId: this.universityId,
+        openAt: this.openAt,
+        closeAtTentative: this.closeAtTentative,
+      };
+    },
+  };
+}
+
+function authorityEventRecord(id, name, status) {
+  return {
+    _id: id,
+    name,
+    status,
+    createdAt: new Date("2026-04-28T10:00:00.000Z"),
+    openAt: status === "PUBLISHED" ? new Date("2026-01-01T00:00:00.000Z") : null,
+    closeAtTentative: status === "PUBLISHED" ? new Date("2026-12-31T00:00:00.000Z") : null,
+    toObject() {
+      return {
+        _id: this._id,
+        name: this.name,
+        status: this.status,
+        createdAt: this.createdAt,
         openAt: this.openAt,
         closeAtTentative: this.closeAtTentative,
       };
