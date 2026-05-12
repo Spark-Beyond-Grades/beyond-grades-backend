@@ -1,5 +1,6 @@
 const express = require("express");
 const cors = require("cors");
+const mongoose = require("mongoose");
 
 const app = express();
 const appRoutes = require("./routes/app.routes");
@@ -28,8 +29,48 @@ app.use("/students", require("./routes/students.routes"));
 app.use("/universities", require("./routes/universities.routes"));
 app.use("/app", appRoutes);
 
-app.get("/health", (req, res) => {
-  res.json({ ok: true, message: "Beyond Grades backend running" });
+app.get("/health", async (req, res) => {
+  const startedAt = process.hrtime.bigint();
+  console.log("Health check started");
+
+  const latencyMs = () => Number((process.hrtime.bigint() - startedAt) / 1000000n);
+
+  try {
+    if (mongoose.connection.readyState !== 1 || !mongoose.connection.db) {
+      throw new Error("MongoDB connection is not active");
+    }
+
+    await mongoose.connection.db.admin().ping();
+    console.log("DB ping success");
+
+    await mongoose.connection.db.collection("universities").findOne(
+      {},
+      {
+        projection: { _id: 1 },
+        maxTimeMS: 1000,
+      }
+    );
+
+    const memoryUsage = process.memoryUsage();
+    const latency = latencyMs();
+    console.log(`Health check latency: ${latency}ms`);
+
+    return res.json({
+      ok: true,
+      database: true,
+      latency,
+      uptime: Math.round(process.uptime()),
+      memory: {
+        rss: Math.round(memoryUsage.rss / 1024 / 1024),
+        heapUsed: Math.round(memoryUsage.heapUsed / 1024 / 1024),
+      },
+    });
+  } catch (err) {
+    const latency = latencyMs();
+    console.error("DB ping failure:", err.message);
+    console.log(`Health check latency: ${latency}ms`);
+    return res.status(500).json({ ok: false });
+  }
 });
 
 app.use((err, req, res, next) => {
