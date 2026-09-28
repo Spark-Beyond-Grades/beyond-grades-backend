@@ -2,7 +2,7 @@ const assert = require("assert");
 const test = require("node:test");
 const mongoose = require("mongoose");
 
-process.env.DO_SPACES_ENDPOINT ||= "https://example.com";
+process.env.CLOUDINARY_URL ||= "cloudinary://key:secret@example";
 
 const Event = require("../models/Event");
 const Participant = require("../models/Participant");

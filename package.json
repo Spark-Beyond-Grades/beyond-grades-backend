@@ -8,15 +8,16 @@
   "scripts": {
     "test": "node --test \"src/**/*.test.js\"",
     "start": "node src/server.js",
-    "dev": "nodemon src/server.js"
+    "dev": "nodemon src/server.js",
+    "migrate:spaces-to-cloudinary": "node scripts/migrate-spaces-to-cloudinary.js",
+    "migrate:spaces-to-cloudinary:dry": "node scripts/migrate-spaces-to-cloudinary.js --dry-run"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "description": "",
   "dependencies": {
-    "@aws-sdk/client-s3": "^3.1037.0",
-    "@aws-sdk/lib-storage": "^3.1037.0",
+    "cloudinary": "^2.11.0",
     "cors": "^2.8.6",
     "csv-parse": "^6.2.1",
     "dotenv": "^17.4.2",

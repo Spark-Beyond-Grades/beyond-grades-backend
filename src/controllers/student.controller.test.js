@@ -6,7 +6,8 @@ const FeedbackSubmission = require("../models/FeedbackSubmission");
 const Participant = require("../models/Participant");
 const Student = require("../models/Student");
 
-process.env.DO_SPACES_ENDPOINT ||= "https://example.com";
+process.env.CLOUDINARY_URL ||= "cloudinary://key:secret@example";
+process.env.DO_SPACES_CDN_BASE ||= "https://cdn.example.com";
 
 const { getEventDetail, getEventTeam, syncStudent } = require("./student.controller");
 
@@ -335,8 +336,8 @@ test("getEventDetail loads published event details for students who are not part
       _id: { toString: () => "64f000000000000000000001" },
       name: "Launch Fest",
       status: "PUBLISHED",
-      eventStartDate: new Date("2026-05-10T10:00:00.000Z"),
-      eventEndDate: new Date("2026-05-11T10:00:00.000Z"),
+      eventStartDate: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+      eventEndDate: new Date(Date.now() + 8 * 24 * 60 * 60 * 1000),
       toObject() {
         return {
           _id: this._id,

@@ -1,49 +1,70 @@
-const { s3 } = require("../config/spaces");
 const crypto = require("crypto");
-const { Upload } = require("@aws-sdk/lib-storage");
 const sharp = require("sharp");
+const { cloudinary } = require("../config/cloudinary");
 
 /**
- * Uploads a buffer to DigitalOcean Spaces.
- * @param {Buffer} buffer - The file buffer.
- * @param {string} fileName - Original file name.
- * @param {string} folder - Folder in the bucket (e.g., 'event-posters').
- * @param {number} targetWidth - Target width for image resizing.
- * @param {number} targetHeight - Target height for image resizing.
- * @returns {Promise<string>} - The URL of the uploaded image.
+ * Upload a buffer to Cloudinary after optional resize.
+ * @param {Buffer} buffer
+ * @param {string} fileName
+ * @param {string} folder Cloudinary folder (e.g. event-posters)
+ * @param {number} targetWidth
+ * @param {number} targetHeight
+ * @returns {Promise<string>} secure_url
  */
-async function uploadToSpaces(buffer, fileName, folder = "general", targetWidth = 512, targetHeight = 512) {
-  // Resize before uploading
+async function uploadImage(
+  buffer,
+  fileName,
+  folder = "general",
+  targetWidth = 512,
+  targetHeight = 512
+) {
   const processedBuffer = await sharp(buffer)
     .resize(targetWidth, targetHeight, {
       fit: "cover",
       position: "center",
-      withoutEnlargement: false
+      withoutEnlargement: false,
     })
+    .jpeg({ quality: 80 })
     .toBuffer();
 
-  const fileExtension = fileName.split(".").pop().toLowerCase();
   const randomName = crypto.randomBytes(16).toString("hex");
-  const key = `${folder}/${randomName}.${fileExtension}`;
+  const publicId = `${folder}/${randomName}`;
 
-  const params = {
-    Bucket: process.env.DO_SPACES_BUCKET,
-    Key: key,
-    Body: processedBuffer,
-    ACL: "public-read",
-    ContentType: `image/${fileExtension === "jpg" ? "jpeg" : fileExtension}`,
-  };
+  const result = await new Promise((resolve, reject) => {
+    const stream = cloudinary.uploader.upload_stream(
+      {
+        public_id: publicId,
+        resource_type: "image",
+        overwrite: false,
+        format: "jpg",
+      },
+      (err, uploaded) => {
+        if (err) reject(err);
+        else resolve(uploaded);
+      }
+    );
+    stream.end(processedBuffer);
+  });
 
-  const uploadResult = await new Upload({
-    client: s3,
-    params,
-  }).done();
-  
-  if (process.env.DO_SPACES_CDN_BASE) {
-    return `${process.env.DO_SPACES_CDN_BASE}/${key}`;
-  }
-  
-  return uploadResult.Location;
+  return result.secure_url;
 }
 
-module.exports = { uploadToSpaces };
+/**
+ * Best-effort delete of a Cloudinary asset by delivery URL.
+ * @param {string} url
+ */
+async function deleteCloudinaryUrl(url) {
+  if (!url || typeof url !== "string") return;
+  if (!url.includes("res.cloudinary.com")) return;
+
+  try {
+    const match = url.match(/\/upload\/(?:v\d+\/)?(.+)\.[a-zA-Z0-9]+(?:\?|$)/);
+    if (!match) return;
+    const publicId = decodeURIComponent(match[1]);
+    await cloudinary.uploader.destroy(publicId, { resource_type: "image" });
+  } catch (err) {
+    console.warn("Failed to delete Cloudinary asset:", err.message);
+  }
+}
+
+module.exports = { uploadImage, deleteCloudinaryUrl };

@@ -532,7 +532,7 @@ exports.closeEvent = async (req, res) => {
   }
 };
 
-const { uploadToSpaces } = require("../utils/uploadImage");
+const { uploadImage } = require("../utils/uploadImage");
 const FeedbackSubmission = require("../models/FeedbackSubmission");
 
 // POST /events/:id/poster
@@ -550,16 +550,14 @@ exports.uploadEventPoster = async (req, res) => {
       return res.status(404).json({ ok: false, message: "Event not found" });
     }
 
-    // Upload to DO Spaces
-    const posterUrl = await uploadToSpaces(
+    const posterUrl = await uploadImage(
       req.file.buffer,
       req.file.originalname,
-      "event-posters",
+      "beyond-grades/event-posters",
       595,
       842
     );
 
-    // Update event document
     event.posterUrl = posterUrl;
     await event.save();
 
@@ -591,16 +589,14 @@ exports.uploadEventLogo = async (req, res) => {
       return res.status(404).json({ ok: false, message: "Event not found" });
     }
 
-    // Upload to DO Spaces
-    const logoUrl = await uploadToSpaces(
+    const logoUrl = await uploadImage(
       req.file.buffer,
       req.file.originalname,
-      "event-logos",
+      "beyond-grades/event-logos",
       512,
       512
     );
 
-    // Update event document
     event.logoUrl = logoUrl;
     await event.save();
 
