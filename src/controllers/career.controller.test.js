@@ -4,6 +4,7 @@ const Certificate = require("../models/Certificate");
 const Startup = require("../models/Startup");
 const Job = require("../models/Job");
 const Application = require("../models/Application");
+const Student = require("../models/Student");
 const career = require("./career.controller");
 const { resizeSettings } = require("../utils/uploadImage");
 
@@ -45,8 +46,9 @@ test("listCertificates matches a certificate saved under a different email case"
   const original = Certificate.find;
   try {
     Certificate.find = (query) => {
-      assert.equal(query.$expr.$eq[1], "a@b.com");
-      assert.equal(JSON.stringify(query).includes("$email"), true);
+      assert.equal(query.email.test("a@b.com"), true);
+      assert.equal(query.email.test("  A @B.com  "), true);
+      assert.equal(query.$expr, undefined);
       return { sort: () => ({ lean: async () => [{ title: "First aid", email: "A@B.com" }] }) };
     };
     const response = createResponse();
@@ -61,7 +63,8 @@ test("listCertificates trims the signed-in email and reports a load failure", as
   const original = Certificate.find;
   try {
     Certificate.find = (query) => {
-      assert.equal(query.$expr.$eq[1], "a@b.com");
+      assert.equal(query.email.test("a@b.com"), true);
+      assert.equal(query.email.test("  A@B.com  "), true);
       return { sort: () => ({ lean: async () => [{ title: "First aid" }] }) };
     };
     const trimmed = createResponse();
@@ -168,8 +171,9 @@ test("registerStartup updates an organization saved under a different email case
   };
   try {
     Startup.findOne = async (query) => {
-      assert.equal(query.$expr.$eq[1], "founder@org.com");
-      assert.equal(JSON.stringify(query).includes("$ownerEmail"), true);
+      assert.equal(query.ownerEmail.test("founder@org.com"), true);
+      assert.equal(query.ownerEmail.test(" Founder@Org.com "), true);
+      assert.equal(query.$expr, undefined);
       return startup;
     };
     Startup.create = async () => {
@@ -224,7 +228,7 @@ test("createJob refuses a posting when the student has no organization", async (
 });
 
 test("listOwnJobs attaches applications to the owner's postings", async () => {
-  const originals = { startup: Startup.findOne, job: Job.find, application: Application.find };
+  const originals = { startup: Startup.findOne, job: Job.find, application: Application.find, student: Student.find };
   try {
     Startup.findOne = async () => ({ _id: "startup-1" });
     Job.find = () => ({
@@ -235,15 +239,44 @@ test("listOwnJobs attaches applications to the owner's postings", async () => {
     Application.find = () => ({
       lean: async () => [{ jobId: "job-1", email: "student@x.com", message: "I can help" }],
     });
+    Student.find = () => ({ select: () => ({ lean: async () => [] }) });
     const response = createResponse();
     await career.listOwnJobs({ user: { email: "founder@org.com" } }, response);
     assert.equal(response.body.jobs[0].title, "Intern");
     assert.equal(response.body.jobs[0].applications[0].email, "student@x.com");
     assert.equal(response.body.jobs[0].applications[0].message, "I can help");
+    assert.equal(response.body.jobs[0].applications[0].name, "");
   } finally {
     Startup.findOne = originals.startup;
     Job.find = originals.job;
     Application.find = originals.application;
+    Student.find = originals.student;
+  }
+});
+
+test("listOwnJobs names an applicant whose saved email differs by case and spaces", async () => {
+  const originals = { startup: Startup.findOne, job: Job.find, application: Application.find, student: Student.find };
+  try {
+    Startup.findOne = async () => ({ _id: "startup-1" });
+    Job.find = () => ({
+      sort: () => ({
+        lean: async () => [{ _id: "job-1", title: "Intern", startupId: "startup-1" }],
+      }),
+    });
+    Application.find = () => ({
+      lean: async () => [{ jobId: "job-1", email: "student@x.com", message: "I can help" }],
+    });
+    Student.find = () => ({
+      select: () => ({ lean: async () => [{ email: " Student@X.com ", name: " Ada " }] }),
+    });
+    const response = createResponse();
+    await career.listOwnJobs({ user: { email: "founder@org.com" } }, response);
+    assert.equal(response.body.jobs[0].applications[0].name, "Ada");
+  } finally {
+    Startup.findOne = originals.startup;
+    Job.find = originals.job;
+    Application.find = originals.application;
+    Student.find = originals.student;
   }
 });
 
@@ -350,7 +383,8 @@ test("applyToJob updates an application saved under a different email case", asy
     Startup.findOne = () => ({ select: () => ({ lean: async () => ({ ownerEmail: "founder@org.com" }) }) });
     Application.findOne = async (query) => {
       assert.equal(query.jobId, "job-1");
-      assert.equal(query.$expr.$eq[1], "student@x.com");
+      assert.equal(query.email.test("student@x.com"), true);
+      assert.equal(query.email.test(" Student@X.com "), true);
       return saved;
     };
     Application.create = async () => {

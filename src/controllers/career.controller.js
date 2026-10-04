@@ -2,15 +2,16 @@ const Certificate = require("../models/Certificate");
 const Startup = require("../models/Startup");
 const Job = require("../models/Job");
 const Application = require("../models/Application");
+const Student = require("../models/Student");
 const { uploadImage } = require("../utils/uploadImage");
-const { sameStoredEmail } = require("../utils/emailQuery");
+const { emailMatchQuery } = require("../utils/emailQuery");
 const { cleanEmail } = require("../utils/csvMatch");
 const { calendarDate } = require("../utils/calendarDate");
 
 exports.listCertificates = async (req, res) => {
   try {
     const email = cleanEmail(req.user?.email);
-    const certificates = await Certificate.find(sameStoredEmail("$email", email)).sort({ createdAt: -1 }).lean();
+    const certificates = await Certificate.find(emailMatchQuery("email", email)).sort({ createdAt: -1 }).lean();
     return res.json({ ok: true, certificates });
   } catch (err) {
     console.error("listCertificates error:", err);
@@ -55,7 +56,7 @@ exports.registerStartup = async (req, res) => {
     const name = String(req.body?.name || "").trim();
     if (!name) return res.status(400).json({ ok: false, message: "Organization name is required" });
     const description = String(req.body?.description || "").trim();
-    const existing = await Startup.findOne(sameStoredEmail("$ownerEmail", ownerEmail));
+    const existing = await Startup.findOne(emailMatchQuery("ownerEmail", ownerEmail));
     if (existing) {
       existing.name = name;
       existing.description = description;
@@ -74,14 +75,14 @@ exports.registerStartup = async (req, res) => {
 exports.listJobs = async (req, res) => {
   try {
   const email = cleanEmail(req.user?.email);
-  const own = await Startup.findOne(sameStoredEmail("$ownerEmail", email)).select("_id").lean();
+  const own = await Startup.findOne(emailMatchQuery("ownerEmail", email)).select("_id").lean();
   const criteria = { open: true };
   if (own) criteria.startupId = { $ne: own._id };
   const jobs = await Job.find(criteria).sort({ createdAt: -1 }).lean();
   const startups = await Startup.find({ _id: { $in: jobs.map((job) => job.startupId).filter(Boolean) } }).lean();
   const byId = new Map(startups.map((startup) => [startup._id.toString(), startup]));
   const applications = await Application.find({
-    ...sameStoredEmail("$email", email),
+    ...emailMatchQuery("email", email),
     jobId: { $in: jobs.map((job) => job._id) },
   }).select("jobId message").lean();
   const messageByJob = new Map(applications.map((application) => [String(application.jobId), application.message || ""]));
@@ -102,7 +103,7 @@ exports.listJobs = async (req, res) => {
 
 exports.createJob = async (req, res) => {
   try {
-    const startup = await Startup.findOne(sameStoredEmail("$ownerEmail", cleanEmail(req.user?.email)));
+    const startup = await Startup.findOne(emailMatchQuery("ownerEmail", cleanEmail(req.user?.email)));
     if (!startup) return res.status(403).json({ ok: false, message: "Register an organization first" });
     const title = String(req.body?.title || "").trim();
     if (!title) return res.status(400).json({ ok: false, message: "Job title is required" });
@@ -120,16 +121,31 @@ exports.createJob = async (req, res) => {
 
 exports.listOwnJobs = async (req, res) => {
   try {
-  const startup = await Startup.findOne(sameStoredEmail("$ownerEmail", cleanEmail(req.user?.email)));
+  const startup = await Startup.findOne(emailMatchQuery("ownerEmail", cleanEmail(req.user?.email)));
   if (!startup) return res.json({ ok: true, startup: null, jobs: [] });
   const jobs = await Job.find({ startupId: startup._id }).sort({ createdAt: -1 }).lean();
   const applications = await Application.find({ jobId: { $in: jobs.map((job) => job._id) } }).lean();
+  const applicantEmails = [...new Set(applications.map((application) => cleanEmail(application.email)).filter(Boolean))];
+  const applicants = applicantEmails.length
+    ? await Student.find(emailMatchQuery("email", applicantEmails)).select("email name").lean()
+    : [];
+  const nameByEmail = new Map();
+  for (const applicant of applicants) {
+    const address = cleanEmail(applicant.email);
+    const name = String(applicant.name || "").trim();
+    if (address && name && !nameByEmail.has(address)) nameByEmail.set(address, name);
+  }
   return res.json({
     ok: true,
     startup,
     jobs: jobs.map((job) => ({
       ...job,
-      applications: applications.filter((application) => String(application.jobId) === String(job._id)),
+      applications: applications
+        .filter((application) => String(application.jobId) === String(job._id))
+        .map((application) => ({
+          ...application,
+          name: nameByEmail.get(cleanEmail(application.email)) || "",
+        })),
     })),
   });
   } catch (err) {
@@ -141,7 +157,7 @@ exports.listOwnJobs = async (req, res) => {
 exports.closeJob = async (req, res) => {
   try {
     const email = cleanEmail(req.user?.email);
-    const startup = await Startup.findOne(sameStoredEmail("$ownerEmail", email)).select("_id").lean();
+    const startup = await Startup.findOne(emailMatchQuery("ownerEmail", email)).select("_id").lean();
     if (!startup) return res.status(403).json({ ok: false, message: "Register an organization first" });
     const job = await Job.findOne({ _id: req.params.jobId, startupId: startup._id });
     if (!job) return res.status(404).json({ ok: false, message: "Job not found" });
@@ -164,7 +180,7 @@ exports.applyToJob = async (req, res) => {
       return res.status(403).json({ ok: false, message: "You cannot apply to your own job" });
     }
     const message = String(req.body?.message || "").trim();
-    const existing = await Application.findOne({ jobId: job._id, ...sameStoredEmail("$email", email) });
+    const existing = await Application.findOne({ jobId: job._id, ...emailMatchQuery("email", email) });
     if (existing) {
       existing.email = email;
       existing.message = message;

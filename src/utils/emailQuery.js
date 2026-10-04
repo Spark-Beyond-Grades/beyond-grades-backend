@@ -22,4 +22,48 @@ function sameStoredEmail(field, email) {
   return { $expr: storedEmailEquals(field, email) };
 }
 
-module.exports = { cleanedStoredEmail, storedEmailEquals, sameStoredEmail, EMAIL_CHARACTERS_TO_STRIP };
+function pcreCharacter(character) {
+  if (character === "\t") return "\\t";
+  if (character === "\n") return "\\n";
+  if (character === "\v") return "\\v";
+  if (character === "\f") return "\\f";
+  if (character === "\r") return "\\r";
+  if (character === "\\") return "\\\\";
+  if (character === "]") return "\\]";
+  if (character === "^") return "\\^";
+  if (character === "-") return "\\-";
+  return character;
+}
+
+function emailMatchPattern(email) {
+  const cleaned = cleanEmail(email);
+  if (!cleaned) return null;
+  const gap = `[${EMAIL_CHARACTERS_TO_STRIP.map(pcreCharacter).join("")}]*`;
+  const body = Array.from(cleaned)
+    .map((character) => character.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .join(gap);
+  const source = `^${gap}${body}${gap}$`;
+  const pattern = new RegExp(source, "i");
+  // JavaScript rewrites U+2028 and U+2029 in RegExp#source as \u escapes.
+  // Atlas PCRE2 rejects \u, so Mongo receives this source with the characters themselves.
+  Object.defineProperty(pattern, "source", { get: () => source });
+  return pattern;
+}
+
+function emailMatchQuery(field, emails) {
+  const patterns = [...new Set((Array.isArray(emails) ? emails : [emails]).map((email) => cleanEmail(email)).filter(Boolean))]
+    .map((email) => emailMatchPattern(email))
+    .filter(Boolean);
+  if (patterns.length === 1) return { [field]: patterns[0] };
+  if (patterns.length > 1) return { $or: patterns.map((pattern) => ({ [field]: pattern })) };
+  return { [field]: /^$/ };
+}
+
+module.exports = {
+  cleanedStoredEmail,
+  storedEmailEquals,
+  sameStoredEmail,
+  emailMatchPattern,
+  emailMatchQuery,
+  EMAIL_CHARACTERS_TO_STRIP,
+};

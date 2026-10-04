@@ -9,6 +9,7 @@
     "test": "node --test \"src/**/*.test.js\"",
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
+    "demo:seed": "node scripts/seed-demo-data.js",
     "migrate:spaces-to-cloudinary": "node scripts/migrate-spaces-to-cloudinary.js",
     "migrate:spaces-to-cloudinary:dry": "node scripts/migrate-spaces-to-cloudinary.js --dry-run"
   },
