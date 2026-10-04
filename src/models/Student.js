@@ -20,6 +20,18 @@ const studentSchema = new mongoose.Schema(
     phone: { type: String, trim: true, default: "" },
     bio: { type: String, trim: true, default: "" },
 
+    dashboardPrivacy: {
+      showName: { type: Boolean, default: true },
+      showPhoto: { type: Boolean, default: true },
+      shareOverallScore: { type: Boolean, default: false },
+      shareSkillScores: { type: Boolean, default: false },
+      shareEventHistory: { type: Boolean, default: false },
+      shareContributions: { type: Boolean, default: false },
+    },
+    shareTokenHash: { type: String, default: null, index: true },
+    shareTokenCreatedAt: { type: Date, default: null },
+    shareTokenRevokedAt: { type: Date, default: null },
+
     lastLoginAt: { type: Date, default: Date.now }
   },
   { timestamps: true } // createdAt, updatedAt

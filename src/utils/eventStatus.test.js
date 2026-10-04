@@ -1,7 +1,7 @@
 const assert = require("assert");
 const test = require("node:test");
 
-const { computeEffectiveStatus } = require("./eventStatus");
+const { computeEffectiveStatus, joinablePublishedFilter } = require("./eventStatus");
 
 test("computeEffectiveStatus uses event dates instead of feedback dates", () => {
   const now = new Date("2026-05-01T10:00:00.000Z");
@@ -18,6 +18,54 @@ test("computeEffectiveStatus uses event dates instead of feedback dates", () => 
   );
 
   assert.strictEqual(status, "SCHEDULED");
+});
+
+test("computeEffectiveStatus closes a published event after its end date", () => {
+  assert.strictEqual(
+    computeEffectiveStatus(
+      {
+        status: "PUBLISHED",
+        eventEndDate: new Date("2026-04-01T10:00:00.000Z"),
+      },
+      new Date("2026-05-01T10:00:00.000Z")
+    ),
+    "CLOSED"
+  );
+});
+
+test("computeEffectiveStatus does not treat a start date as the end", () => {
+  const now = new Date("2026-06-02T10:00:00.000Z");
+  assert.strictEqual(
+    computeEffectiveStatus(
+      {
+        status: "PUBLISHED",
+        eventStartDate: new Date("2026-06-01T10:00:00.000Z"),
+        eventDate: new Date("2026-06-01T10:00:00.000Z"),
+        eventEndDate: null,
+      },
+      now
+    ),
+    "PUBLISHED"
+  );
+  assert.strictEqual(
+    computeEffectiveStatus(
+      {
+        status: "PUBLISHED",
+        eventDate: new Date("2026-04-01T10:00:00.000Z"),
+      },
+      now
+    ),
+    "CLOSED"
+  );
+});
+
+test("joinablePublishedFilter hides a published event after its calendar end", () => {
+  const now = new Date("2026-05-01T10:00:00.000Z");
+  const filter = joinablePublishedFilter(now);
+  assert.strictEqual(filter.status, "PUBLISHED");
+  assert.deepStrictEqual(filter.$nor[0], { closeAtActual: { $exists: true, $ne: null } });
+  assert.deepStrictEqual(filter.$nor[1], { eventEndDate: { $lte: now } });
+  assert.deepStrictEqual(filter.$nor[2], { eventEndDate: null, eventStartDate: null, eventDate: { $lte: now } });
 });
 
 test("computeEffectiveStatus keeps event-only published events as published when dates are absent", () => {

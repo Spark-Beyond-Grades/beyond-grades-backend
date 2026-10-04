@@ -26,6 +26,7 @@ app.use(express.json({ limit: "1mb" }));
 app.use("/auth", require("./routes/auth.routes"));
 app.use("/events", require("./routes/events.routes"));
 app.use("/students", require("./routes/students.routes"));
+app.use("/career", require("./routes/career.routes"));
 app.use("/universities", require("./routes/universities.routes"));
 app.use("/app", appRoutes);
 

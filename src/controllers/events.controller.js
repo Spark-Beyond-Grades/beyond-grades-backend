@@ -4,9 +4,220 @@ const Authority = require("../models/Authority");
 const Student = require("../models/Student");
 const University = require("../models/University");
 const mongoose = require("mongoose");
-const { computeEffectiveStatus } = require("../utils/eventStatus");
+const { computeEffectiveStatus, joinablePublishedFilter } = require("../utils/eventStatus");
 const { mapEventForStudentFeed } = require("../utils/eventFeed");
 const { parse } = require("csv-parse/sync");
+const FeedbackSubmission = require("../models/FeedbackSubmission");
+const { scoreEvent, auditStatus, uniqueParticipants, alignScoringConfigToStructure } = require("../utils/epaFormula");
+const { cell, canonicalChoice, cleanEmail, uniqueSkills, canonicalEventStructure, unmatchedAllowedLevel } = require("../utils/csvMatch");
+const { storedEmailEquals, sameStoredEmail, cleanedStoredEmail } = require("../utils/emailQuery");
+const { calendarDate } = require("../utils/calendarDate");
+
+function reviewIsComplete(submission, skills) {
+  const ratings = submission?.ratings || [];
+  return skills.length > 0 && skills.every((skill) => ratings.some((rating) => {
+    if (canonicalChoice(rating?.skill, [skill]) !== skill || rating.skipped === true) return false;
+    if (typeof rating.score === "string" && rating.score.trim() === "") return false;
+    if (rating.score === null || rating.score === undefined || rating.score === false || rating.score === true) return false;
+    return Number.isFinite(Number(typeof rating.score === "string" ? rating.score.trim() : rating.score));
+  }));
+}
+
+function presentAuthorityEvent(event, extra = {}) {
+  const eventObj = event.toObject ? event.toObject() : { ...event };
+  if (!eventObj.eventDate && eventObj.eventStartDate) eventObj.eventDate = eventObj.eventStartDate;
+  const structure = canonicalEventStructure(eventObj);
+  const scoringConfig = eventObj.scoringConfig
+    ? alignScoringConfigToStructure(eventObj.scoringConfig, structure)
+    : eventObj.scoringConfig;
+  return {
+    ...eventObj,
+    ...structure,
+    ...(scoringConfig ? { scoringConfig } : {}),
+    ...extra,
+    effectiveStatus: computeEffectiveStatus(event),
+  };
+}
+
+function withAudit(scored, event) {
+  const closed = event?.status === "CLOSED" || Boolean(event?.closeAtActual);
+  return { ...scored, auditStatus: auditStatus(scored, { closed }) };
+}
+
+async function withParticipantNames(scored, participants) {
+  const roster = uniqueParticipants(participants);
+  const names = new Map(roster.map((person) => [person.email, String(person.name || "").trim()]));
+  const missing = roster.filter((person) => person.email && !names.get(person.email)).map((person) => person.email);
+  if (missing.length) {
+    try {
+      const accounts = await Student.find({
+        $expr: {
+          $in: [
+            cleanedStoredEmail("$email"),
+            missing,
+          ],
+        },
+      }).select("email name").lean();
+      for (const account of accounts) {
+        const email = cleanEmail(account.email);
+        const accountName = String(account.name || "").trim();
+        if (email && accountName && !names.get(email)) names.set(email, accountName);
+      }
+    } catch (err) {
+      console.error("withParticipantNames error:", err);
+    }
+  }
+  return {
+    ...scored,
+    participants: (scored.participants || []).map((person) => {
+      const name = names.get(cleanEmail(person.email)) || "";
+      return name ? { ...person, name } : person;
+    }),
+  };
+}
+
+const SCORING_ENUMS = {
+  evenMedianRule: ["average", "lower", "higher"],
+  blankSkillPolicy: ["ignoreSkill", "ignorePair"],
+  unscoredSkillPolicy: ["exclude", "block"],
+  crossEventRule: ["none", "equal", "confidence"],
+  lateSubmissions: ["allow", "reject"],
+};
+
+const SCORING_VALUE_LABELS = {
+  scaleMin: "lowest raw rating",
+  scaleMax: "highest raw rating",
+  levelInfluence: "level influence",
+  committeeWeightSame: "same-committee weight",
+  committeeWeightTop: "top-rank weight",
+  committeeWeightOther: "other-committee weight",
+  credibilityEpsilon: "credibility constant",
+  credibilityShrinkage: "credibility shrinkage",
+  confidencePrior: "confidence prior",
+  minimumRatings: "minimum review count",
+  evenMedianRule: "even-median rule",
+  blankSkillPolicy: "blank-skill rule",
+  unscoredSkillPolicy: "unscored-skill rule",
+  crossEventRule: "cross-event rule",
+  lateSubmissions: "late-review rule",
+  allowSelfRatings: "self-rating choice",
+  applyRelevanceToSkillWeights: "relevance choice",
+  contributesToScoring: "whether this event counts toward EPA",
+  showComments: "comment visibility",
+  identifyRaters: "who-reviewed-whom choice",
+};
+
+function scoringValueLabel(key) {
+  if (key.startsWith("positive:")) {
+    const field = key.slice("positive:".length);
+    return `a ${SCORING_VALUE_LABELS[field] || field} above zero`;
+  }
+  if (key.startsWith("nonNegative:skillWeight:")) {
+    return `a skill weight for ${key.slice("nonNegative:skillWeight:".length)} of zero or higher`;
+  }
+  if (key.startsWith("nonNegative:relevance:")) {
+    const [, , committee, skill] = key.split(":");
+    return `relevance for ${committee} and ${skill} of zero or higher`;
+  }
+  if (key.startsWith("nonNegative:")) {
+    const field = key.slice("nonNegative:".length);
+    return `a ${SCORING_VALUE_LABELS[field] || field} of zero or higher`;
+  }
+  if (key.startsWith("levelRank:")) return `the rank for ${key.slice("levelRank:".length)}`;
+  if (key.startsWith("skillWeight:")) return `the skill weight for ${key.slice("skillWeight:".length)}`;
+  if (key.startsWith("relevance:")) {
+    const [, committee, skill] = key.split(":");
+    return `the relevance for ${committee} and ${skill}`;
+  }
+  return SCORING_VALUE_LABELS[key] || key;
+}
+
+function scoringSaveMessage(invalid) {
+  const problems = invalid.map(scoringValueLabel);
+  const constraints = invalid.every((key) => key.startsWith("nonNegative:") || key.startsWith("positive:"));
+  if (constraints) return `Enter ${problems.join(", ")}`;
+  return `Enter a valid value for ${problems.join(", ")}`;
+}
+
+function scoringBoolean(value) {
+  if (typeof value === "boolean") return value;
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "yes" || normalized === "true") return true;
+  if (normalized === "no" || normalized === "false") return false;
+  return undefined;
+}
+
+function scoringNumber(value) {
+  if (value === "" || value === undefined) return { skip: true };
+  if (value === null) return { value: null };
+  if (typeof value === "boolean" || (typeof value === "string" && value.trim() === "")) return { invalid: true };
+  const number = Number(typeof value === "string" ? value.trim() : value);
+  if (!Number.isFinite(number)) return { invalid: true };
+  return { value: number };
+}
+
+function numericMap(input, invalid, prefix) {
+  const output = {};
+  for (const [key, value] of Object.entries(input || {})) {
+    if (value === "" || value === null || value === undefined) continue;
+    const parsed = scoringNumber(value);
+    if (parsed.invalid || parsed.value == null) invalid.push(`${prefix}:${key}`);
+    else output[key] = parsed.value;
+  }
+  return output;
+}
+
+function sanitizeScoringConfig(input) {
+  const config = {};
+  const invalid = [];
+  for (const field of ["scaleMin", "scaleMax", "levelInfluence", "committeeWeightSame", "committeeWeightTop", "committeeWeightOther", "credibilityEpsilon", "credibilityShrinkage", "confidencePrior"]) {
+    const parsed = scoringNumber(input[field]);
+    if (parsed.skip) continue;
+    if (parsed.invalid) invalid.push(field);
+    else config[field] = parsed.value;
+  }
+  for (const [field, allowed] of Object.entries(SCORING_ENUMS)) {
+    if (typeof input[field] !== "string" || !input[field]) continue;
+    if (!allowed.includes(input[field])) invalid.push(field);
+    else config[field] = input[field];
+  }
+  for (const field of ["allowSelfRatings", "applyRelevanceToSkillWeights", "contributesToScoring", "showComments", "identifyRaters"]) {
+    if (input[field] === undefined || input[field] === null || input[field] === "") continue;
+    const choice = scoringBoolean(input[field]);
+    if (choice === undefined) invalid.push(field);
+    else config[field] = choice;
+  }
+  if (input.minimumRatings !== undefined) {
+    const parsed = scoringNumber(input.minimumRatings);
+    if (!parsed.skip && parsed.value !== null) {
+      if (parsed.invalid) invalid.push("minimumRatings");
+      else config.minimumRatings = parsed.value;
+    }
+  }
+  if (input.levelRanks && typeof input.levelRanks === "object") config.levelRanks = numericMap(input.levelRanks, invalid, "levelRank");
+  if (input.skillWeights && typeof input.skillWeights === "object") config.skillWeights = numericMap(input.skillWeights, invalid, "skillWeight");
+  if (input.relevance && typeof input.relevance === "object") {
+    config.relevance = {};
+    for (const [committee, skills] of Object.entries(input.relevance)) {
+      if (skills && typeof skills === "object") config.relevance[committee] = numericMap(skills, invalid, `relevance:${committee}`);
+    }
+  }
+  if (config.credibilityEpsilon != null && config.credibilityEpsilon <= 0) invalid.push("positive:credibilityEpsilon");
+  for (const field of ["committeeWeightSame", "committeeWeightTop", "committeeWeightOther", "credibilityShrinkage", "confidencePrior"]) {
+    if (config[field] != null && config[field] < 0) invalid.push(`nonNegative:${field}`);
+  }
+  if (config.minimumRatings != null && config.minimumRatings < 0) invalid.push("nonNegative:minimumRatings");
+  for (const [skill, weight] of Object.entries(config.skillWeights || {})) {
+    if (weight < 0) invalid.push(`nonNegative:skillWeight:${skill}`);
+  }
+  for (const [committee, skills] of Object.entries(config.relevance || {})) {
+    for (const [skill, value] of Object.entries(skills)) {
+      if (value < 0) invalid.push(`nonNegative:relevance:${committee}:${skill}`);
+    }
+  }
+  return { config, invalid };
+}
 
 const STUDENT_FEED_DEFAULT_LIMIT = 20;
 const STUDENT_FEED_COMPAT_LIMIT = 50;
@@ -94,8 +305,8 @@ function encodeStudentFeedCursor(event) {
   ).toString("base64url");
 }
 
-function buildStudentFeedFilter(filter, studentUniversityId) {
-  const criteria = { status: "PUBLISHED" };
+function buildStudentFeedFilter(filter, studentUniversityId, now = new Date()) {
+  const criteria = joinablePublishedFilter(now);
   const universityId = toMongoObjectId(studentUniversityId);
   if (filter === "UNIVERSITY") {
     criteria.universityId = universityId;
@@ -118,7 +329,7 @@ function buildCursorCriteria(cursor) {
       { createdAt: { $lt: cursor.createdAt } },
       {
         createdAt: cursor.createdAt,
-        _id: { $lt: cursor.id },
+        _id: { $lt: toMongoObjectId(cursor.id) },
       },
     ],
   };
@@ -165,7 +376,12 @@ async function fetchStudentFeedEvents(options, studentUniversityId) {
     pipeline.push({ $sort: { createdAt: -1, _id: -1 } });
     pipeline.push({ $limit: options.limit + 1 });
 
-    return Event.aggregate(pipeline);
+    try {
+      return await Event.aggregate(pipeline);
+    } catch (err) {
+      console.error("event search index failed, using text match:", err.message);
+      return fetchStudentFeedByText(options, studentUniversityId, cursorCriteria);
+    }
   }
 
   const filter = buildStudentFeedFilter(options.filter, studentUniversityId);
@@ -178,12 +394,26 @@ async function fetchStudentFeedEvents(options, studentUniversityId) {
     .limit(options.limit + 1);
 }
 
+function escapeSearchText(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function fetchStudentFeedByText(options, studentUniversityId, cursorCriteria) {
+  const filter = buildStudentFeedFilter(options.filter, studentUniversityId);
+  const pattern = new RegExp(escapeSearchText(options.q), "i");
+  filter.$or = STUDENT_FEED_SEARCH_PATHS.map((path) => ({ [path]: pattern }));
+  const query = cursorCriteria ? { $and: [filter, cursorCriteria] } : filter;
+  return Event.find(query)
+    .sort({ createdAt: -1, _id: -1 })
+    .limit(options.limit + 1);
+}
+
 // POST /events
 exports.createDraftEvent = async (req, res) => {
   try {
     const { name = "", type = "OTHER", description = "", templateId = "T1", minAppBuild = 1 } = req.body || {};
 
-    const authority = await Authority.findOne({ email: req.user.email });
+    const authority = await Authority.findOne(sameStoredEmail("$email", req.user.email));
     if (!authority) return res.status(403).json({ ok: false, message: "Not an authority" });
 
     if (!authority.universityId) {
@@ -205,7 +435,7 @@ exports.createDraftEvent = async (req, res) => {
 
     return res.status(201).json({
       ok: true,
-      event: { ...event.toObject(), effectiveStatus: computeEffectiveStatus(event) },
+      event: presentAuthorityEvent(event),
     });
   } catch (err) {
     console.error("❌ createDraftEvent:", err.message);
@@ -220,10 +450,7 @@ exports.listEvents = async (req, res) => {
       groupId: req.user.groupId,
     }).sort({ createdAt: -1 });
 
-    const mapped = events.map((e) => ({
-      ...e.toObject(),
-      effectiveStatus: computeEffectiveStatus(e),
-    }));
+    const mapped = events.map((e) => presentAuthorityEvent(e));
 
     return res.json({ ok: true, events: mapped });
   } catch (err) {
@@ -235,7 +462,7 @@ exports.listEvents = async (req, res) => {
 // PUT /events/:id
 exports.updateEvent = async (req, res) => {
   try {
-    const { name, type, description, eventStartDate, eventEndDate, venue, openAt, closeAtTentative, levels, committees, skills, posterUrl, logoUrl } =
+    const { name, type, description, eventStartDate, eventEndDate, venue, openAt, closeAtTentative, levels, committees, skills, posterUrl, logoUrl, scoringConfig } =
       req.body || {};
 
     const event = await Event.findOne({ _id: req.params.id, groupId: req.user.groupId });
@@ -245,16 +472,23 @@ exports.updateEvent = async (req, res) => {
       return res.status(400).json({ ok: false, message: "Event is closed and cannot be edited" });
     }
 
-    if (typeof name === "string") event.name = name.trim();
-    if (typeof description === "string") event.description = description.trim();
-    if (typeof venue === "string") event.venue = venue.trim();
-    if (eventStartDate !== undefined) {
-      event.eventStartDate = eventStartDate ? new Date(eventStartDate) : null;
+    const draft = event.status === "DRAFT";
+    if (draft && typeof name === "string") event.name = name.trim();
+    if (draft && typeof description === "string") event.description = description.trim();
+    if (draft && typeof venue === "string") event.venue = venue.trim();
+    if (draft && eventStartDate !== undefined) {
+      const parsed = calendarDate(eventStartDate);
+      if (parsed?.invalid) return res.status(400).json({ ok: false, message: "Enter a valid date and time" });
+      event.eventStartDate = parsed;
       event.eventDate = event.eventStartDate; // Mirror to old field for database views
     }
-    if (eventEndDate !== undefined) event.eventEndDate = eventEndDate ? new Date(eventEndDate) : null;
+    if (draft && eventEndDate !== undefined) {
+      const parsed = calendarDate(eventEndDate);
+      if (parsed?.invalid) return res.status(400).json({ ok: false, message: "Enter a valid date and time" });
+      event.eventEndDate = parsed;
+    }
 
-    if (typeof type === "string") {
+    if (draft && typeof type === "string") {
       const allowed = ["CLUB", "PROJECT", "FEST", "COMMITTEE", "OTHER"];
       if (!allowed.includes(type)) {
         return res.status(400).json({ ok: false, message: "Invalid event type" });
@@ -265,9 +499,16 @@ exports.updateEvent = async (req, res) => {
     if (posterUrl !== undefined) event.posterUrl = posterUrl;
     if (logoUrl !== undefined) event.logoUrl = logoUrl;
 
-    if (openAt !== undefined) event.openAt = openAt ? new Date(openAt) : null;
-    if (closeAtTentative !== undefined)
-      event.closeAtTentative = closeAtTentative ? new Date(closeAtTentative) : null;
+    if (openAt !== undefined) {
+      const parsed = calendarDate(openAt);
+      if (parsed?.invalid) return res.status(400).json({ ok: false, message: "Enter a valid date and time" });
+      event.openAt = parsed;
+    }
+    if (closeAtTentative !== undefined) {
+      const parsed = calendarDate(closeAtTentative);
+      if (parsed?.invalid) return res.status(400).json({ ok: false, message: "Enter a valid date and time" });
+      event.closeAtTentative = parsed;
+    }
 
     if (event.openAt && event.closeAtTentative && event.openAt >= event.closeAtTentative) {
       return res.status(400).json({
@@ -276,46 +517,35 @@ exports.updateEvent = async (req, res) => {
       });
     }
 
-    if (Array.isArray(levels)) {
-      const cleanedLevels = levels
-        .map((l) => (typeof l === "string" ? l.trim() : ""))
-        .filter(Boolean);
-      event.levels = [...new Set(cleanedLevels)];
+    if (draft && Array.isArray(levels)) {
+      event.levels = canonicalEventStructure({ levels }).levels;
     }
 
-    if (Array.isArray(committees)) {
-      const cleanedCommittees = committees
-        .map((c) => {
-          const cname = typeof c?.name === "string" ? c.name.trim() : "";
-          const allowedLevels = Array.isArray(c?.allowedLevels)
-            ? c.allowedLevels
-              .map((l) => (typeof l === "string" ? l.trim() : ""))
-              .filter(Boolean)
-            : [];
-          return { name: cname, allowedLevels };
-        })
-        .filter((c) => c.name);
-
-      const levelsSet = new Set(event.levels || []);
-      for (const c of cleanedCommittees) {
-        for (const lv of c.allowedLevels) {
-          if (event.levels?.length && !levelsSet.has(lv)) {
-            return res.status(400).json({
-              ok: false,
-              message: `Invalid mapping: level "${lv}" not present in levels[]`,
-            });
-          }
-        }
+    if (draft && Array.isArray(committees)) {
+      const unmatched = unmatchedAllowedLevel(committees, event.levels || []);
+      if (unmatched) {
+        return res.status(400).json({
+          ok: false,
+          message: `Invalid mapping: level "${unmatched}" not present in levels[]`,
+        });
       }
-
-      event.committees = cleanedCommittees;
+      event.committees = canonicalEventStructure({ levels: event.levels, committees }).committees;
     }
 
-    if (Array.isArray(skills)) {
-      const cleanedSkills = skills
-        .map((s) => (typeof s === "string" ? s.trim() : ""))
-        .filter(Boolean);
-      event.skills = [...new Set(cleanedSkills)];
+    if (draft && Array.isArray(skills)) {
+      event.skills = uniqueSkills(skills);
+    }
+
+    if (scoringConfig && typeof scoringConfig === "object") {
+      const sanitized = sanitizeScoringConfig(scoringConfig);
+      if (sanitized.invalid.length) {
+        return res.status(400).json({
+          ok: false,
+          message: scoringSaveMessage(sanitized.invalid),
+        });
+      }
+      event.scoringConfig = sanitized.config;
+      event.markModified("scoringConfig");
     }
 
     await event.save();
@@ -334,7 +564,7 @@ exports.updateEvent = async (req, res) => {
 
     return res.json({
       ok: true,
-      event: { ...event.toObject(), effectiveStatus: computeEffectiveStatus(event) },
+      event: presentAuthorityEvent(event),
     });
   } catch (err) {
     console.error("❌ updateEvent:", err.message);
@@ -356,6 +586,37 @@ exports.getParticipants = async (req, res) => {
   }
 };
 
+// DELETE /events/:id/participants
+exports.removeParticipant = async (req, res) => {
+  try {
+    const email = cleanEmail(req.body?.email || "");
+    if (!email) return res.status(400).json({ ok: false, message: "Email is required" });
+
+    const event = await Event.findOne({ _id: req.params.id, groupId: req.user.groupId });
+    if (!event) return res.status(404).json({ ok: false, message: "Event not found" });
+    if (event.status === "CLOSED" || event.closeAtActual) {
+      return res.status(400).json({ ok: false, message: "Event is closed and its participant list is locked" });
+    }
+
+    const removed = await Participant.deleteMany({
+      eventId: event._id,
+      $expr: storedEmailEquals("$email", email),
+    });
+    if (!removed.deletedCount) return res.status(404).json({ ok: false, message: "Participant not found" });
+    await FeedbackSubmission.deleteMany({
+      eventId: event._id,
+      $or: [
+        { $expr: storedEmailEquals("$raterEmail", email) },
+        { $expr: storedEmailEquals("$targetEmail", email) },
+      ],
+    });
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error("❌ removeParticipant:", err.message);
+    return res.status(500).json({ ok: false, message: "Failed to remove participant" });
+  }
+};
+
 // POST /events/:id/participants/upload
 exports.uploadParticipantsCsv = async (req, res) => {
   try {
@@ -363,6 +624,9 @@ exports.uploadParticipantsCsv = async (req, res) => {
 
     const event = await Event.findOne({ _id: req.params.id, groupId: req.user.groupId });
     if (!event) return res.status(404).json({ ok: false, message: "Event not found" });
+    if (event.status === "CLOSED" || event.closeAtActual) {
+      return res.status(400).json({ ok: false, message: "Event is closed and its participant list is locked" });
+    }
 
     const csvText = req.file.buffer.toString("utf-8");
 
@@ -376,8 +640,9 @@ exports.uploadParticipantsCsv = async (req, res) => {
       return res.status(400).json({ ok: false, message: "CSV has no rows" });
     }
 
-    const validCommittees = new Set((event.committees || []).map((c) => c.name));
-    const validLevels = new Set(event.levels || []);
+    const structure = canonicalEventStructure(event);
+    const committeeOptions = (structure.committees || []).map((committee) => committee.name).filter(Boolean);
+    const levelOptions = structure.levels || [];
 
     const errors = [];
     const seenEmails = new Set();
@@ -386,14 +651,14 @@ exports.uploadParticipantsCsv = async (req, res) => {
     for (let i = 0; i < records.length; i++) {
       const row = records[i] || {};
 
-      const name = (row.name || row.Name || "").toString().trim();
-      const email = (row.email || row.Email || "").toString().trim().toLowerCase();
-      const rollNumber = (row.rollNumber || row.RollNumber || row.roll || row.Roll || "")
-        .toString()
-        .trim();
-      const committee = (row.committee || row.Committee || "").toString().trim();
-      const level = (row.level || row.Level || "").toString().trim();
-      const position = (row.position || row.Position || "").toString().trim();
+      const name = cell(row, ["name"]).trim();
+      const email = cleanEmail(cell(row, ["email"]));
+      const rollNumber = cell(row, ["rollnumber", "roll", "roll number"]).trim();
+      const committeeInput = cell(row, ["committee", "committee name"]).trim();
+      const levelInput = cell(row, ["level"]).trim();
+      const position = cell(row, ["position"]).trim();
+      const committee = canonicalChoice(committeeInput, committeeOptions);
+      const level = canonicalChoice(levelInput, levelOptions);
 
       if (!email) {
         errors.push({ row: i + 2, field: "email", message: "Missing email" });
@@ -406,13 +671,27 @@ exports.uploadParticipantsCsv = async (req, res) => {
       }
       seenEmails.add(email);
 
-      if (committee && validCommittees.size > 0 && !validCommittees.has(committee)) {
-        errors.push({ row: i + 2, field: "committee", message: `Unknown committee "${committee}"` });
+      if (committeeOptions.length > 0 && !committee) {
+        errors.push({
+          row: i + 2,
+          field: "committee",
+          message: committeeInput ? `Unknown committee "${committeeInput}"` : "Committee is required",
+        });
         continue;
       }
 
-      if (level && validLevels.size > 0 && !validLevels.has(level)) {
-        errors.push({ row: i + 2, field: "level", message: `Unknown level "${level}"` });
+      if (levelOptions.length > 0 && !level) {
+        errors.push({
+          row: i + 2,
+          field: "level",
+          message: levelInput ? `Unknown level "${levelInput}"` : "Level is required",
+        });
+        continue;
+      }
+
+      const committeeRow = (structure.committees || []).find((item) => item.name === committee);
+      if (committeeRow?.allowedLevels?.length && level && !committeeRow.allowedLevels.some((allowed) => canonicalChoice(level, [allowed]))) {
+        errors.push({ row: i + 2, field: "level", message: `Level "${levelInput}" is not mapped to ${committee}` });
         continue;
       }
 
@@ -431,19 +710,37 @@ exports.uploadParticipantsCsv = async (req, res) => {
       return res.status(400).json({ ok: false, message: "CSV validation failed", errors });
     }
 
-    const ops = docs.map((d) => ({
-      updateOne: {
-        filter: { eventId: d.eventId, email: d.email },
-        update: { $setOnInsert: d },
-        upsert: true,
-      },
-    }));
+    const existingRows = await Participant.find({ eventId: event._id }).select("_id email").lean();
+    const existingByEmail = new Map();
+    for (const row of existingRows) {
+      const key = cleanEmail(row.email);
+      if (key && !existingByEmail.has(key)) existingByEmail.set(key, row);
+    }
+
+    const ops = docs.map((d) => {
+      const set = { email: d.email };
+      for (const field of ["name", "rollNumber", "committee", "level", "position"]) {
+        if (d[field]) set[field] = d[field];
+      }
+      const existing = existingByEmail.get(d.email);
+      if (existing) {
+        return { updateOne: { filter: { _id: existing._id }, update: { $set: set } } };
+      }
+      return {
+        updateOne: {
+          filter: { eventId: d.eventId, email: d.email },
+          update: { $set: set, $setOnInsert: { eventId: d.eventId, email: d.email } },
+          upsert: true,
+        },
+      };
+    });
 
     const result = await Participant.bulkWrite(ops, { ordered: false });
 
     return res.json({
       ok: true,
       inserted: result.upsertedCount || 0,
+      updated: result.modifiedCount || 0,
       total: docs.length,
     });
   } catch (err) {
@@ -478,11 +775,7 @@ exports.publishEvent = async (req, res) => {
     return res.json({
       ok: true,
       message: "Event published successfully",
-      event: {
-        ...event.toObject(),
-        participantsCount,
-        effectiveStatus: computeEffectiveStatus(event),
-      },
+      event: presentAuthorityEvent(event, { participantsCount }),
     });
   } catch (err) {
     console.error("❌ publishEvent:", err.message);
@@ -498,11 +791,77 @@ exports.getEventById = async (req, res) => {
 
     return res.json({
       ok: true,
-      event: { ...event.toObject(), effectiveStatus: computeEffectiveStatus(event) },
+      event: presentAuthorityEvent(event),
     });
   } catch (err) {
     console.error("❌ getEventById:", err.message);
     return res.status(500).json({ ok: false, message: "Failed to fetch event" });
+  }
+};
+
+exports.deleteEvent = async (req, res) => {
+  try {
+    const event = await Event.findOne({ _id: req.params.id, groupId: req.user.groupId });
+    if (!event) return res.status(404).json({ ok: false, message: "Event not found" });
+    await Participant.deleteMany({ eventId: event._id });
+    await FeedbackSubmission.deleteMany({ eventId: event._id });
+    await Event.deleteOne({ _id: event._id });
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error("deleteEvent error:", err);
+    return res.status(500).json({ ok: false, message: "Failed to delete event" });
+  }
+};
+
+exports.previewEventScores = async (req, res) => {
+  try {
+    const event = await Event.findOne({ _id: req.params.id, groupId: req.user.groupId }).lean();
+    if (!event) return res.status(404).json({ ok: false, message: "Event not found" });
+    const participants = await Participant.find({ eventId: event._id }).lean();
+    if ((event.status === "CLOSED" || event.closeAtActual) && event.frozenScores) {
+      return res.json({ ok: true, scored: await withParticipantNames(withAudit(event.frozenScores, event), participants) });
+    }
+    const submissions = await FeedbackSubmission.find({ eventId: event._id, submittedAt: { $ne: null } }).lean();
+    return res.json({
+      ok: true,
+      scored: await withParticipantNames(withAudit(scoreEvent({
+        skills: event.skills || [],
+        participants,
+        submissions,
+        config: event.scoringConfig,
+      }), event), participants),
+    });
+  } catch (err) {
+    console.error("previewEventScores error:", err);
+    return res.status(500).json({ ok: false, message: "Failed to preview scores" });
+  }
+};
+
+exports.recalculateEventScores = async (req, res) => {
+  try {
+    const event = await Event.findOne({ _id: req.params.id, groupId: req.user.groupId });
+    if (!event) return res.status(404).json({ ok: false, message: "Event not found" });
+    if (event.frozenScores) {
+      event.frozenScoreHistory = [...(event.frozenScoreHistory || []), event.frozenScores];
+    }
+    const participants = await Participant.find({ eventId: event._id }).lean();
+    const submissions = await FeedbackSubmission.find({ eventId: event._id, submittedAt: { $ne: null } }).lean();
+    event.frozenScores = await withParticipantNames({
+      ...withAudit(scoreEvent({
+        skills: event.skills || [],
+        participants,
+        submissions,
+        config: event.scoringConfig,
+      }), event),
+      frozenAt: new Date(),
+    }, participants);
+    event.markModified("frozenScores");
+    event.markModified("frozenScoreHistory");
+    await event.save();
+    return res.json({ ok: true, frozenScores: event.frozenScores, history: event.frozenScoreHistory || [] });
+  } catch (err) {
+    console.error("recalculateEventScores error:", err);
+    return res.status(500).json({ ok: false, message: "Failed to recalculate scores" });
   }
 };
 
@@ -512,19 +871,34 @@ exports.closeEvent = async (req, res) => {
     const event = await Event.findOne({ _id: req.params.id, groupId: req.user.groupId });
     if (!event) return res.status(404).json({ ok: false, message: "Event not found" });
 
-    const effective = computeEffectiveStatus(event);
-    if (effective !== "OPEN") {
-      return res.status(400).json({ ok: false, message: "Only OPEN events can be closed" });
+    if (event.status !== "PUBLISHED" || event.closeAtActual) {
+      return res.status(400).json({ ok: false, message: "Only a published event that has not been closed can be closed" });
     }
 
     event.status = "CLOSED";
     event.closeAtActual = new Date();
+    if (event.frozenScores) {
+      event.frozenScoreHistory = [...(event.frozenScoreHistory || []), event.frozenScores];
+      event.markModified("frozenScoreHistory");
+    }
+    const participants = await Participant.find({ eventId: event._id }).lean();
+    const submissions = await FeedbackSubmission.find({ eventId: event._id, submittedAt: { $ne: null } }).lean();
+    event.frozenScores = await withParticipantNames({
+      ...withAudit(scoreEvent({
+        skills: event.skills || [],
+        participants,
+        submissions,
+        config: event.scoringConfig,
+      }), event),
+      frozenAt: new Date(),
+    }, participants);
+    event.markModified("frozenScores");
     await event.save();
 
     return res.json({
       ok: true,
       message: "Event closed successfully",
-      event: { ...event.toObject(), effectiveStatus: computeEffectiveStatus(event) },
+      event: presentAuthorityEvent(event),
     });
   } catch (err) {
     console.error("❌ closeEvent:", err.message);
@@ -533,7 +907,6 @@ exports.closeEvent = async (req, res) => {
 };
 
 const { uploadImage } = require("../utils/uploadImage");
-const FeedbackSubmission = require("../models/FeedbackSubmission");
 
 // POST /events/:id/poster
 exports.uploadEventPoster = async (req, res) => {
@@ -623,56 +996,91 @@ exports.getFeedbackSummary = async (req, res) => {
 
     const summaries = await Promise.all(
       events.map(async (event) => {
-        const participants = await Participant.find({ eventId: event._id });
-        const emailToName = {};
-        participants.forEach(p => {
-          emailToName[p.email] = p.name || p.email;
-        });
-
-        const submissionAgg = await FeedbackSubmission.aggregate([
-          { $match: { eventId: event._id, submittedAt: { $ne: null } } },
-          {
-            $group: {
-              _id: "$raterEmail",
-              submittedCount: { $sum: 1 },
-              ratedTargets: { $push: "$targetEmail" }
-            }
+        const participants = uniqueParticipants(await Participant.find({ eventId: event._id }).lean());
+        const skills = uniqueSkills(event.skills);
+        const allowSelf = event.scoringConfig?.allowSelfRatings === true;
+        const identifyRaters = event.scoringConfig?.identifyRaters === true;
+        const address = (value) => cleanEmail(value);
+        const unnamed = participants
+          .filter((person) => !String(person.name || "").trim())
+          .map((person) => person.email);
+        const accountNames = new Map();
+        if (unnamed.length) {
+          const accounts = await Student.find({
+            $expr: {
+              $in: [
+                cleanedStoredEmail("$email"),
+                unnamed,
+              ],
+            },
+          }).select("email name").lean();
+          for (const account of accounts) {
+            const accountName = String(account.name || "").trim();
+            if (accountName) accountNames.set(address(account.email), accountName);
           }
-        ]);
-
-        const submissionMap = {};
-        submissionAgg.forEach(s => {
-          submissionMap[s._id] = {
-            count: s.submittedCount,
-            targets: s.ratedTargets.map(email => ({
-              email,
-              name: emailToName[email] || email
-            }))
-          };
+        }
+        const displayName = (email, rosterName) => String(rosterName || "").trim() || accountNames.get(address(email)) || "";
+        const emailToName = {};
+        participants.forEach((person) => {
+          emailToName[address(person.email)] = displayName(person.email, person.name) || "Participant";
         });
 
-        const enrichedParticipants = participants.map(p => {
-          const stats = submissionMap[p.email] || { count: 0, targets: [] };
-          const requiredCount = participants.length - 1;
+        const submissions = await FeedbackSubmission.find({
+          eventId: event._id,
+          submittedAt: { $ne: null },
+        }).select("raterEmail targetEmail ratings").lean();
+        const submissionMap = {};
+        const startedRaters = new Set();
+        submissions.forEach((submission) => {
+          const rater = address(submission.raterEmail);
+          const target = address(submission.targetEmail);
+          if (!allowSelf && rater && rater === target) return;
+          const mentionsSkill = (submission.ratings || []).some((rating) => canonicalChoice(rating?.skill, skills));
+          if (mentionsSkill) startedRaters.add(rater);
+          if (!reviewIsComplete(submission, skills)) return;
+          const stats = submissionMap[rater] || { count: 0, targets: [] };
+          stats.count += 1;
+          stats.targets.push({ email: target, name: emailToName[target] || "Participant" });
+          submissionMap[rater] = stats;
+        });
+
+        const enrichedParticipants = participants.map((person) => {
+          const personEmail = address(person.email);
+          const stats = submissionMap[personEmail] || { count: 0, targets: [] };
+          const requiredCount = skills.length ? Math.max(participants.length - (allowSelf ? 0 : 1), 0) : 0;
+          const started = startedRaters.has(personEmail);
 
           return {
-            ...p.toObject(),
+            name: displayName(person.email, person.name),
+            email: person.email,
+            rollNumber: person.rollNumber || "",
+            level: person.level || "",
+            committee: person.committee || "",
             submittedCount: stats.count,
             requiredCount,
-            completionPct: requiredCount > 0 ? Math.round((stats.count / requiredCount) * 100) : 0,
-            isComplete: stats.count >= requiredCount && requiredCount > 0,
-            ratedTargets: stats.targets
+            completionPct: requiredCount > 0 ? Math.round((stats.count / requiredCount) * 100) : 100,
+            isComplete: requiredCount === 0 || stats.count >= requiredCount,
+            started,
+            ratedTargets: identifyRaters ? stats.targets : [],
           };
         });
 
+        const eventView = { ...(event.toObject ? event.toObject() : { ...event }), ...canonicalEventStructure(event) };
+        delete eventView.scoringConfig;
+        delete eventView.frozenScores;
+        delete eventView.frozenScoreHistory;
+        if (!eventView.eventDate && eventView.eventStartDate) eventView.eventDate = eventView.eventStartDate;
         return {
           event: {
-            ...event.toObject(),
-            effectiveStatus: computeEffectiveStatus(event)
+            ...eventView,
+            effectiveStatus: computeEffectiveStatus(event),
+            allowSelfRatings: event.scoringConfig?.allowSelfRatings === true,
+            identifyRaters,
           },
           totalParticipants: participants.length,
           fullySubmittedCount: enrichedParticipants.filter(p => p.isComplete).length,
-          notStartedCount: enrichedParticipants.filter(p => p.submittedCount === 0).length,
+          partialCount: enrichedParticipants.filter((p) => p.requiredCount > 0 && p.started && !p.isComplete).length,
+          notStartedCount: enrichedParticipants.filter((p) => p.requiredCount > 0 && !p.started).length,
           participants: enrichedParticipants,
         };
       })
@@ -688,14 +1096,12 @@ exports.getFeedbackSummary = async (req, res) => {
 // GET /events/suggestions
 exports.getSuggestions = async (req, res) => {
   try {
-    const groupId = req.user.groupId;
-    const authority = await Authority.findOne({ email: req.user.email });
-    if (!authority) return res.status(403).json({ ok: false, message: "Not an authority" });
+    const authority = await Authority.findOne(sameStoredEmail("$email", req.user.email));
+    if (!authority?.universityId) return res.status(403).json({ ok: false, message: "Not an authority" });
 
-
-    // Aggregate across ALL published/closed events to get global top suggestions
+    const campus = { status: { $in: ["PUBLISHED", "CLOSED"] }, universityId: authority.universityId };
     const levelsResult = await Event.aggregate([
-      { $match: { status: { $in: ["PUBLISHED", "CLOSED"] } } },
+      { $match: campus },
       { $unwind: "$levels" },
       { $group: { _id: { $trim: { input: { $toLower: "$levels" } } }, originalName: { $first: "$levels" }, count: { $sum: 1 } } },
       { $sort: { count: -1 } },
@@ -703,7 +1109,7 @@ exports.getSuggestions = async (req, res) => {
     ]);
 
     const committeesResult = await Event.aggregate([
-      { $match: { status: { $in: ["PUBLISHED", "CLOSED"] } } },
+      { $match: campus },
       { $unwind: "$committees" },
       { $group: { _id: { $trim: { input: { $toLower: "$committees.name" } } }, originalName: { $first: "$committees.name" }, count: { $sum: 1 } } },
       { $sort: { count: -1 } },

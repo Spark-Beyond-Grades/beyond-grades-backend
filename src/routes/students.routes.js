@@ -1,7 +1,17 @@
 const router = require("express").Router();
 const requireStudent = require("../middleware/requireStudent");
 const upload = require("../middleware/uploadPhoto");
-const { syncStudent,getEventDetail,uploadStudentPhoto , updateProfile, getEventTeam, submitEventFeedback } = require("../controllers/student.controller");
+const { syncStudent,getEventDetail,uploadStudentPhoto , updateProfile, getEventTeam, submitEventFeedback, getStudentDashboard, getDashboardPrivacy, updateDashboardPrivacy, rotateDashboardShareToken, revokeDashboardShareToken, getPublicDashboardProfile, getLeaderboard, registerForEvent } = require("../controllers/student.controller");
+
+// GET /students/dashboard
+router.get("/dashboard", requireStudent, getStudentDashboard);
+router.get("/leaderboard", requireStudent, getLeaderboard);
+router.post("/events/:eventId/register", requireStudent, registerForEvent);
+router.get("/dashboard/privacy", requireStudent, getDashboardPrivacy);
+router.put("/dashboard/privacy", requireStudent, updateDashboardPrivacy);
+router.post("/dashboard/share-token/rotate", requireStudent, rotateDashboardShareToken);
+router.post("/dashboard/share-token/revoke", requireStudent, revokeDashboardShareToken);
+router.get("/dashboard/public/:token", getPublicDashboardProfile);
 
 // POST /students/sync
 router.post("/sync", requireStudent, syncStudent);

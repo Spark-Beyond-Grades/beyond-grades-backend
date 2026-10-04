@@ -19,6 +19,11 @@ test("mapEventForStudentFeed labels events from the student's university", () =>
         status: this.status,
         openAt: this.openAt,
         closeAtTentative: this.closeAtTentative,
+        scoringConfig: { scaleMin: 1 },
+        createdByEmail: "organizer@example.com",
+        groupId: "authority-group",
+        skills: ["Planning", "Speaking"],
+        frozenScores: { participants: [{ email: "hidden@example.com", eventScore: 9 }] },
       };
     },
   };
@@ -27,6 +32,13 @@ test("mapEventForStudentFeed labels events from the student's university", () =>
 
   assert.strictEqual(mapped.isUniversityEvent, true);
   assert.strictEqual(mapped.feedScope, "UNIVERSITY");
+  assert.strictEqual(mapped.scoringConfig, undefined);
+  assert.strictEqual(mapped.frozenScores, undefined);
+  assert.strictEqual(mapped.createdByEmail, undefined);
+  assert.strictEqual(mapped.groupId, undefined);
+  assert.deepStrictEqual(mapped.skills, ["Planning", "Speaking"]);
+  assert.strictEqual(JSON.stringify(mapped).includes("hidden@example.com"), false);
+  assert.strictEqual(JSON.stringify(mapped).includes("organizer@example.com"), false);
 });
 
 test("mapEventForStudentFeed labels events from other universities", () => {

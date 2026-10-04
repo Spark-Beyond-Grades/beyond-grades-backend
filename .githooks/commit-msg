@@ -1,0 +1,21 @@
+#!/bin/sh
+# Strip Cursor attribution trailers before the commit is written.
+msg_file="$1"
+if [ -z "$msg_file" ] || [ ! -f "$msg_file" ]; then
+  exit 0
+fi
+
+tmp="${msg_file}.strip-cursor"
+grep -v -i -E '^[[:space:]]*(Co-authored-by:.*cursor.*|Made-with:.*cursor.*|Made with Cursor.*)[[:space:]]*$' "$msg_file" > "$tmp" || exit 1
+
+while [ -s "$tmp" ]; do
+  last=$(tail -n 1 "$tmp" | tr -d '\r')
+  if [ -z "$last" ]; then
+    sed '$d' "$tmp" > "${tmp}.trim" && mv "${tmp}.trim" "$tmp"
+  else
+    break
+  fi
+done
+
+mv "$tmp" "$msg_file"
+exit 0

@@ -58,6 +58,9 @@ const EventSchema = new mongoose.Schema(
     universityName: { type: String, default: null }, // optional cache
     templateId: { type: String, default: "T1" }, // ex: T1..Tn
     minAppBuild: { type: Number, default: 1 },   // minimum app versionCode required
+    scoringConfig: { type: mongoose.Schema.Types.Mixed },
+    frozenScores: { type: mongoose.Schema.Types.Mixed },
+    frozenScoreHistory: { type: [mongoose.Schema.Types.Mixed], default: undefined },
 
   },
   { timestamps: true },

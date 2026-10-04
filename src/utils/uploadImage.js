@@ -11,19 +11,24 @@ const { cloudinary } = require("../config/cloudinary");
  * @param {number} targetHeight
  * @returns {Promise<string>} secure_url
  */
+function resizeSettings(fit = "cover") {
+  return {
+    fit,
+    position: "center",
+    withoutEnlargement: fit === "inside",
+  };
+}
+
 async function uploadImage(
   buffer,
   fileName,
   folder = "general",
   targetWidth = 512,
-  targetHeight = 512
+  targetHeight = 512,
+  fit = "cover"
 ) {
   const processedBuffer = await sharp(buffer)
-    .resize(targetWidth, targetHeight, {
-      fit: "cover",
-      position: "center",
-      withoutEnlargement: false,
-    })
+    .resize(targetWidth, targetHeight, resizeSettings(fit))
     .jpeg({ quality: 80 })
     .toBuffer();
 
@@ -67,4 +72,4 @@ async function deleteCloudinaryUrl(url) {
   }
 }
 
-module.exports = { uploadImage, deleteCloudinaryUrl };
+module.exports = { uploadImage, deleteCloudinaryUrl, resizeSettings };

@@ -15,11 +15,12 @@ const imageUpload = multer({
     return callback(null, true);
   },
 });
+const { isCsvUpload } = require("../utils/csvMatch");
 const csvUpload = multer({
   storage,
   limits: { fileSize: 1 * 1024 * 1024 },
   fileFilter(req, file, callback) {
-    if (!["text/csv", "application/vnd.ms-excel"].includes(file.mimetype)) {
+    if (!isCsvUpload(file)) {
       return callback(new Error("Only CSV files are allowed"));
     }
     return callback(null, true);
@@ -32,10 +33,14 @@ const {
   listEvents,
   updateEvent,
   getParticipants,
+  removeParticipant,
   uploadParticipantsCsv,
   publishEvent,
   getEventById,
   closeEvent,
+  deleteEvent,
+  recalculateEventScores,
+  previewEventScores,
   uploadEventPoster,
   uploadEventLogo,
   getFeedbackSummary,
@@ -60,10 +65,14 @@ router.post("/:id/poster", imageUpload.single("poster"), uploadEventPoster);
 router.post("/:id/logo", imageUpload.single("logo"), uploadEventLogo);
 
 router.get("/:id/participants", getParticipants);
+router.delete("/:id/participants", removeParticipant);
 router.post("/:id/participants/upload", csvUpload.single("file"), uploadParticipantsCsv);
 
 router.post("/:id/publish", publishEvent);
 router.get("/:id", getEventById);
 router.post("/:id/close", closeEvent);
+router.delete("/:id", deleteEvent);
+router.post("/:id/recalculate", recalculateEventScores);
+router.get("/:id/scores", previewEventScores);
 
 module.exports = router;
