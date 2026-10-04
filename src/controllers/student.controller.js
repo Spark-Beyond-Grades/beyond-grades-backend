@@ -379,8 +379,16 @@ function storedAddress(value) {
   return cleanEmail(value);
 }
 
+function storedEmailFilter(field, email) {
+  const escaped = String(email || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return { [field]: new RegExp(`^\\s*${escaped}\\s*$`, "i") };
+}
+
 async function eventsJoinedBy(email) {
-  const memberships = await Participant.find({ $expr: storedEmailEquals("$email", email) }).select("eventId").lean();
+  // Keep this query shallow. The old $expr recursively nested a $replaceAll
+  // for every whitespace character and could exceed Atlas's 50-level BSON
+  // nesting limit before the cursor was initialized.
+  const memberships = await Participant.find(storedEmailFilter("email", email)).select("eventId").lean();
   const eventIds = [...new Set(memberships.map((row) => row.eventId).filter(Boolean))];
   if (!eventIds.length) return [];
   // Do not hydrate the unbounded audit-history Mixed field here. Besides not
@@ -403,8 +411,8 @@ exports.getStudentDashboard = async (req, res) => {
 
     const events = await eventsJoinedBy(email);
     const given = await FeedbackSubmission.find({
+      ...storedEmailFilter("raterEmail", email),
       submittedAt: { $ne: null },
-      $expr: storedEmailEquals("$raterEmail", email),
     }).select("eventId targetEmail ratings").lean();
 
     const eventResults = [];
