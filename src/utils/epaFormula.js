@@ -2,6 +2,25 @@ const { normalizeLabel, cleanEmail, uniqueSkills } = require("./csvMatch");
 
 const FORMULA_VERSION = "epa-reindexed-v1";
 
+const DEFAULT_SCORING_VALUES = {
+  scaleMin: 1,
+  scaleMax: 10,
+  levelInfluence: 0,
+  committeeWeightSame: 1,
+  committeeWeightTop: 1,
+  committeeWeightOther: 1,
+  credibilityEpsilon: 0.05,
+  credibilityShrinkage: 5,
+  confidencePrior: 5,
+  evenMedianRule: "average",
+  allowSelfRatings: false,
+  blankSkillPolicy: "ignoreSkill",
+  unscoredSkillPolicy: "exclude",
+  crossEventRule: "confidence",
+  applyRelevanceToSkillWeights: false,
+  contributesToScoring: true,
+};
+
 const REQUIRED_FIELDS = [
   "scaleMin",
   "scaleMax",
@@ -314,8 +333,18 @@ function alignParticipants(participants, config) {
 
 function scoreEvent({ skills: listedSkills = [], participants: rawParticipants = [], submissions = [], config }) {
   const skills = uniqueSkills(listedSkills);
+  const initialParticipants = uniqueParticipants(rawParticipants);
+  const levels = [...new Set(initialParticipants.map((person) => person.level).filter(Boolean))];
+  const committees = [...new Set(initialParticipants.map((person) => person.committee).filter(Boolean))];
+  config = {
+    ...DEFAULT_SCORING_VALUES,
+    ...(config || {}),
+    levelRanks: { ...Object.fromEntries(levels.map((level, index) => [level, index + 1])), ...(config?.levelRanks || {}) },
+    skillWeights: { ...Object.fromEntries(skills.map((skill) => [skill, 1])), ...(config?.skillWeights || {}) },
+    relevance: { ...Object.fromEntries(committees.map((committee) => [committee, Object.fromEntries(skills.map((skill) => [skill, 1]))])), ...(config?.relevance || {}) },
+  };
   config = alignSkillSettings(config, skills);
-  const participants = alignParticipants(uniqueParticipants(rawParticipants), config);
+  const participants = alignParticipants(initialParticipants, config);
   const coverage = reviewCoverage(participants, submissions, config?.allowSelfRatings, skills);
   const structure = {
     levels: [...new Set(participants.map((person) => person.level).filter(Boolean))],

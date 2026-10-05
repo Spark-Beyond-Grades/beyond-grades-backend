@@ -201,16 +201,16 @@ test("an inverted scale produces no score", () => {
   assert.equal(result.participants[0].eventScore, null);
 });
 
-test("missing settings produce no score", () => {
+test("missing settings use the safe scoring defaults", () => {
   const result = scoreEvent({
     skills: ["Planning"],
     participants: [{ email: "a@example.com", level: "Volunteer", committee: "Ops" }],
     submissions: [],
     config: { scaleMin: 1 },
   });
-  assert.equal(result.configured, false);
+  assert.equal(result.configured, true);
   assert.equal(result.participants[0].eventScore, null);
-  assert.ok(result.missing.includes("scaleMax"));
+  assert.deepEqual(result.missing, []);
   assert.equal(missingSettings(null)[0], "scoringConfig");
 });
 
@@ -651,7 +651,7 @@ test("turning scoring off before the formula is filled does not invent a skill s
   assert.equal(result.eligible, false);
   assert.equal(result.participants[0].status, "NOT_ELIGIBLE");
   assert.equal(result.participants[0].eventScore, null);
-  assert.deepEqual(result.participants[0].skills, []);
+  assert.equal(result.participants[0].skills[0].reason, "no_ratings");
 });
 
 test("a submitted review counts toward rater volume even when that skill was skipped", () => {
