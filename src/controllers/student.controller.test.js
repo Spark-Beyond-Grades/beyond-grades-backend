@@ -1659,7 +1659,10 @@ test("getEventDetail loads published event details for students who are not part
   };
 
   try {
-    Event.findById = async () => ({
+    Event.findById = async (id, projection) => {
+      assert.equal(projection.frozenScoreHistory, 0);
+      assert.equal(projection.frozenScores, 0);
+      return ({
       _id: { toString: () => "64f000000000000000000001" },
       name: "Launch Fest",
       status: "PUBLISHED",
@@ -1677,9 +1680,14 @@ test("getEventDetail loads published event details for students who are not part
           frozenScores: { participants: [{ email: "hidden@example.com", eventScore: 9 }] },
           frozenScoreHistory: [{ participants: [{ email: "hidden@example.com" }] }],
         };
-      },
-    });
-    Participant.findOne = async () => null;
+        },
+      });
+    };
+    Participant.findOne = async (filter) => {
+      assert.equal(filter.$expr, undefined);
+      assert.equal(filter.email.test("outsider@example.com"), true);
+      return null;
+    };
 
     const req = {
       params: { eventId: "64f000000000000000000001" },

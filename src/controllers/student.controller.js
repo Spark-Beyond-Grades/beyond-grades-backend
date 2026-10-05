@@ -9,9 +9,16 @@ const { uploadImage, deleteCloudinaryUrl } = require("../utils/uploadImage");
 const { scoreEvent, combineOverall, auditStatus, uniqueParticipants, snapToScale, FORMULA_VERSION } = require("../utils/epaFormula");
 const { createShareToken, hashShareToken } = require("../utils/shareToken");
 const { canonicalChoice, normalizeLabel, cleanEmail, uniqueSkills, canonicalEventStructure } = require("../utils/csvMatch");
-const { storedEmailEquals, cleanedStoredEmail } = require("../utils/emailQuery");
+const { storedEmailEquals, cleanedStoredEmail, emailMatchQuery } = require("../utils/emailQuery");
 const { allowPublicProfileLookup, publicProfileClientKey } = require("../utils/publicProfileLimit");
 const { calendarDate } = require("../utils/calendarDate");
+
+const STUDENT_EVENT_READ = {
+  frozenScoreHistory: 0,
+  frozenScores: 0,
+  createdByEmail: 0,
+  groupId: 0,
+};
 
 const DASHBOARD_PRIVACY_DEFAULTS = {
   showName: true,
@@ -944,14 +951,14 @@ exports.getEventDetail = async (req, res) => {
       return res.status(400).json({ ok: false, message: "No email in token" });
     }
 
-    const event = await Event.findById(eventId);
+    const event = await Event.findById(eventId, STUDENT_EVENT_READ);
 
     if (!event) {
       return res.status(404).json({ ok: false, message: "Event not found" });
     }
     const participant = await Participant.findOne({
       eventId: event._id,
-      $expr: storedEmailEquals("$email", studentEmail),
+      ...emailMatchQuery("email", studentEmail),
     });
 
     const feedbackClosed = feedbackWindowClosed(event);
