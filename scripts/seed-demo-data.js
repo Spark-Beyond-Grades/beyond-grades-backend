@@ -8,6 +8,7 @@ const FeedbackSubmission = require("../src/models/FeedbackSubmission");
 const Startup = require("../src/models/Startup");
 const Job = require("../src/models/Job");
 const Certificate = require("../src/models/Certificate");
+const { scoreEvent } = require("../src/utils/epaFormula");
 
 const email = (process.argv[2] || "indrajitroy@jklu.edu.in").trim().toLowerCase();
 const groupId = "demo-ui-review-2026";
@@ -40,9 +41,10 @@ async function main() {
     venue: "JKLU Innovation Hub",
     type: "PROJECT",
     createdByEmail: "demo.organizer@jklu.edu.in",
-    status: "PUBLISHED",
+    status: "CLOSED",
     openAt: new Date(now.getTime() - 86400000),
     closeAtTentative: new Date(now.getTime() + 14 * 86400000),
+    closeAtActual: now,
     levels: ["Junior", "Senior"],
     skills: ["Communication", "Ownership", "Problem solving"],
     committees: [
@@ -60,7 +62,14 @@ async function main() {
       credibilityEpsilon: 0.1, credibilityShrinkage: 3, confidencePrior: 0.5,
       allowSelfRatings: false, applyRelevanceToSkillWeights: false,
       contributesToScoring: true, showComments: true, identifyRaters: true,
-      crossEventRule: "equal", skillWeights: { Communication: 1, Ownership: 1, "Problem solving": 1 },
+      crossEventRule: "confidence", evenMedianRule: "average",
+      blankSkillPolicy: "ignoreSkill", unscoredSkillPolicy: "exclude",
+      skillWeights: { Communication: 1, Ownership: 1, "Problem solving": 1 },
+      levelRanks: { Junior: 1, Senior: 2 },
+      relevance: {
+        Product: { Communication: 1, Ownership: 1, "Problem solving": 1 },
+        Research: { Communication: 1, Ownership: 1, "Problem solving": 1 },
+      },
     },
   });
 
@@ -77,6 +86,20 @@ async function main() {
     { eventId: event._id, raterEmail: email, targetEmail: peerOne.email, ratings: ratings([8, 8, 7], "A reliable collaborator who explains decisions well."), submittedAt: now },
     { eventId: event._id, raterEmail: email, targetEmail: peerTwo.email, ratings: ratings([9, 8, 9], "Excellent research synthesis and follow-through."), submittedAt: now },
   ]);
+
+  const participants = await Participant.find({ eventId: event._id }).lean();
+  const submissions = await FeedbackSubmission.find({ eventId: event._id, submittedAt: { $ne: null } }).lean();
+  event.frozenScores = {
+    ...scoreEvent({
+      skills: event.skills,
+      participants,
+      submissions,
+      config: event.scoringConfig,
+    }),
+    frozenAt: now,
+  };
+  event.markModified("frozenScores");
+  await event.save();
 
   const startup = await Startup.findOneAndUpdate(
     { ownerEmail: email, name: "Beyond Grades Demo Studio" },
