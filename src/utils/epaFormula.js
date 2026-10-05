@@ -146,10 +146,11 @@ function auditStatus(scored, { closed = false } = {}) {
 
 function reviewCoverage(participants, submissions, allowSelf, skills = []) {
   const emails = new Set(participants.map((person) => cleanEmail(person.email)).filter(Boolean));
+  const skillNames = new Set(skills);
+  if (!skillNames.size) return { submittedReviews: 0, expectedReviews: null, countable: false };
   const expectedReviews = allowSelf === true || allowSelf === false
     ? emails.size * (allowSelf ? emails.size : Math.max(emails.size - 1, 0))
     : null;
-  const skillNames = new Set(skills);
   const seen = new Set();
   for (const submission of submissions) {
     const rater = cleanEmail(submission.raterEmail);
@@ -160,7 +161,7 @@ function reviewCoverage(participants, submissions, allowSelf, skills = []) {
     if (!mentionsCurrentSkill) continue;
     seen.add(`${rater}\0${target}`);
   }
-  return { submittedReviews: seen.size, expectedReviews };
+  return { submittedReviews: seen.size, expectedReviews, countable: true };
 }
 
 function uniqueParticipants(participants) {
@@ -316,24 +317,6 @@ function scoreEvent({ skills: listedSkills = [], participants: rawParticipants =
   config = alignSkillSettings(config, skills);
   const participants = alignParticipants(uniqueParticipants(rawParticipants), config);
   const coverage = reviewCoverage(participants, submissions, config?.allowSelfRatings, skills);
-  if (config?.contributesToScoring === false) {
-    return {
-      formulaVersion: FORMULA_VERSION,
-      configured: true,
-      eligible: false,
-      missing: [],
-      coverage,
-      participants: participants.map((person) => ({
-        email: cleanEmail(person.email),
-        eventScore: null,
-        confidence: null,
-        status: "NOT_ELIGIBLE",
-        reason: "not_eligible",
-        skills: [],
-      })),
-    };
-  }
-
   const structure = {
     levels: [...new Set(participants.map((person) => person.level).filter(Boolean))],
     committees: [...new Set(participants.map((person) => person.committee).filter(Boolean))],
@@ -350,6 +333,23 @@ function scoreEvent({ skills: listedSkills = [], participants: rawParticipants =
     if (!String(person.committee || "").trim()) roleGaps.push("committee");
   }
   const structuralMissing = [...missingSettings(config, structure), ...new Set(roleGaps)];
+  if (config?.contributesToScoring === false && structuralMissing.length) {
+    return {
+      formulaVersion: FORMULA_VERSION,
+      configured: true,
+      eligible: false,
+      missing: [],
+      coverage,
+      participants: participants.map((person) => ({
+        email: cleanEmail(person.email),
+        eventScore: null,
+        confidence: null,
+        status: "NOT_ELIGIBLE",
+        reason: "not_eligible",
+        skills: [],
+      })),
+    };
+  }
   if (structuralMissing.length) {
     return {
       formulaVersion: FORMULA_VERSION,
@@ -396,8 +396,8 @@ function scoreEvent({ skills: listedSkills = [], participants: rawParticipants =
   const cell = new Map();
   for (const [pairKey, bySkill] of pairSkills) {
     const missingSkill = skills.some((skill) => rawScore(bySkill.get(skill), scaleMin, scaleMax) == null);
-    if (config.blankSkillPolicy === "ignorePair" && missingSkill) continue;
     reviewMask.add(pairKey);
+    if (config.blankSkillPolicy === "ignorePair" && missingSkill) continue;
     for (const skill of skills) {
       const raw = rawScore(bySkill.get(skill), scaleMin, scaleMax);
       if (raw == null) continue;
@@ -570,12 +570,12 @@ function scoreEvent({ skills: listedSkills = [], participants: rawParticipants =
       reason: provisional ? "below_minimum_ratings" : null,
       scaleMin,
       scaleMax,
-      crossEventRule: config.crossEventRule,
+      crossEventRule: "confidence",
       skills: skillResults,
     };
   });
 
-  return {
+  const scoredEvent = {
     formulaVersion: FORMULA_VERSION,
     configured: true,
     eligible: true,
@@ -583,8 +583,20 @@ function scoreEvent({ skills: listedSkills = [], participants: rawParticipants =
     coverage,
     scaleMin,
     scaleMax,
-    crossEventRule: config.crossEventRule,
+    crossEventRule: "confidence",
     participants: participantResults,
+  };
+  if (config?.contributesToScoring !== false) return scoredEvent;
+  return {
+    ...scoredEvent,
+    eligible: false,
+    participants: participantResults.map((person) => ({
+      ...person,
+      eventScore: null,
+      confidence: null,
+      status: "NOT_ELIGIBLE",
+      reason: "not_eligible",
+    })),
   };
 }
 
@@ -593,21 +605,18 @@ function combineOverall(results) {
     return { score: null, confidence: null, status: "NO_DATA", reason: "no_events", eventCount: 0, rule: null, scaleMin: null, scaleMax: null };
   }
   const contributing = results.filter((result) =>
-    result.crossEventRule &&
-    result.crossEventRule !== "none" &&
     result.status !== "NOT_CONFIGURED" &&
     result.status !== "NOT_ELIGIBLE"
   );
-  const rules = [...new Set(contributing.map((result) => result.crossEventRule))];
+  const rules = ["confidence"];
   if (!contributing.length) {
-    const onlyNone = results.some((result) => result.crossEventRule === "none");
     return {
       score: null,
       confidence: null,
       status: "NO_DATA",
-      reason: onlyNone ? "cross_event_disabled" : "no_event_scores",
+      reason: "no_event_scores",
       eventCount: 0,
-      rule: onlyNone ? "none" : null,
+      rule: "confidence",
       scaleMin: null,
       scaleMax: null,
     };

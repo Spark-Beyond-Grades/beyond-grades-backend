@@ -9,7 +9,7 @@ const { uploadImage, deleteCloudinaryUrl } = require("../utils/uploadImage");
 const { scoreEvent, combineOverall, auditStatus, uniqueParticipants, snapToScale, FORMULA_VERSION } = require("../utils/epaFormula");
 const { createShareToken, hashShareToken } = require("../utils/shareToken");
 const { canonicalChoice, normalizeLabel, cleanEmail, uniqueSkills, canonicalEventStructure } = require("../utils/csvMatch");
-const { storedEmailEquals, cleanedStoredEmail, emailMatchQuery } = require("../utils/emailQuery");
+const { emailMatchQuery } = require("../utils/emailQuery");
 const { allowPublicProfileLookup, publicProfileClientKey } = require("../utils/publicProfileLimit");
 const { calendarDate } = require("../utils/calendarDate");
 
@@ -113,7 +113,10 @@ exports.getPublicDashboardProfile = async (req, res) => {
     if (publicOverall) publicOverall.auditStatus = overallAuditStatus(scoringEvents);
     const shownForDate = [];
     const shownIds = new Set();
-    for (const event of [...scoredEvents, ...skillSourceEvents]) {
+    const datedEvents = [];
+    if (privacy.shareEventHistory || privacy.shareOverallScore || privacy.shareSkillScores) datedEvents.push(...scoredEvents);
+    if (privacy.shareSkillScores) datedEvents.push(...skillSourceEvents);
+    for (const event of datedEvents) {
       if (shownIds.has(event.eventId)) continue;
       shownIds.add(event.eventId);
       shownForDate.push(event);
@@ -122,7 +125,7 @@ exports.getPublicDashboardProfile = async (req, res) => {
     if (privacy.shareContributions) {
       const given = await FeedbackSubmission.find({
         submittedAt: { $ne: null },
-        $expr: storedEmailEquals("$raterEmail", email),
+        ...emailMatchQuery("raterEmail", email),
       }).select("eventId targetEmail ratings").lean();
       const eventIds = [...new Set(given.map((submission) => String(submission.eventId)))];
       const contributedEvents = eventIds.length
@@ -156,17 +159,11 @@ exports.getPublicDashboardProfile = async (req, res) => {
         photoUrl: privacy.showPhoto ? student.photoUrl || null : null,
         overall: privacy.shareOverallScore ? publicOverall : null,
         skills: privacy.shareSkillScores
-          ? skillSourceEvents.flatMap((event) => (event.skills || []).filter((skill) => skill.score != null).map((skill) => ({
-              eventId: event.eventId,
-              skill: skill.skill,
-              score: skill.score,
-              confidence: skill.confidence,
-              scaleMin: event.scaleMin,
-              scaleMax: event.scaleMax,
-              eventName: event.eventName,
-            })))
+          ? skillSourceEvents.flatMap((event) => (event.skills || []).filter((skill) => skill.score != null).map((skill) => (
+              publicSkillRecord(skill, event, privacy.shareEventHistory)
+            )))
           : [],
-        skillHistory: privacy.shareSkillScores ? skillHistoryFromEvents(skillSourceEvents) : [],
+        skillHistory: privacy.shareSkillScores ? publicSkillHistory(skillHistoryFromEvents(skillSourceEvents), privacy.shareEventHistory) : [],
         events: privacy.shareEventHistory
           ? scoredEvents.map(({ skills, crossEventRule, frozenAt, ...event }) => event)
           : [],
@@ -233,8 +230,8 @@ function eventScoreSnapshot(event, participants, submissions) {
 }
 
 function crossEventRuleFor(event, scored) {
-  if (event.status === "CLOSED" && event.frozenScores) return scored.crossEventRule || null;
-  return event.scoringConfig?.crossEventRule || null;
+  if (event.status === "CLOSED" && event.frozenScores) return scored.crossEventRule ? "confidence" : null;
+  return event.scoringConfig ? "confidence" : null;
 }
 
 function profileCalculatedAt(events, now = new Date()) {
@@ -271,6 +268,36 @@ function overallAuditStatus(events) {
   if (statuses.includes("provisional")) return "provisional";
   if (statuses.includes("collecting")) return "collecting";
   return "final";
+}
+
+function publicSkillRecord(skill, event, shareEventHistory) {
+  const record = {
+    skill: skill.skill,
+    score: skill.score,
+    confidence: skill.confidence ?? null,
+    scaleMin: event.scaleMin ?? null,
+    scaleMax: event.scaleMax ?? null,
+  };
+  if (shareEventHistory) {
+    record.eventId = event.eventId;
+    record.eventName = event.eventName;
+  }
+  return record;
+}
+
+function publicSkillHistory(rows, shareEventHistory) {
+  if (shareEventHistory) return rows;
+  return (rows || []).map((row) => ({
+    skill: row.skill,
+    direction: row.direction,
+    points: (row.points || []).map((point) => ({
+      score: point.score,
+      confidence: point.confidence ?? null,
+      ratingCount: point.ratingCount ?? null,
+      scaleMin: point.scaleMin ?? null,
+      scaleMax: point.scaleMax ?? null,
+    })),
+  }));
 }
 
 function skillHistoryFromEvents(events) {
@@ -386,16 +413,11 @@ function storedAddress(value) {
   return cleanEmail(value);
 }
 
-function storedEmailFilter(field, email) {
-  const escaped = String(email || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return { [field]: new RegExp(`^\\s*${escaped}\\s*$`, "i") };
-}
-
 async function eventsJoinedBy(email) {
   // Keep this query shallow. The old $expr recursively nested a $replaceAll
   // for every whitespace character and could exceed Atlas's 50-level BSON
   // nesting limit before the cursor was initialized.
-  const memberships = await Participant.find(storedEmailFilter("email", email)).select("eventId").lean();
+  const memberships = await Participant.find(emailMatchQuery("email", email)).select("eventId").lean();
   const eventIds = [...new Set(memberships.map((row) => row.eventId).filter(Boolean))];
   if (!eventIds.length) return [];
   // Do not hydrate the unbounded audit-history Mixed field here. Besides not
@@ -418,7 +440,7 @@ exports.getStudentDashboard = async (req, res) => {
 
     const events = await eventsJoinedBy(email);
     const given = await FeedbackSubmission.find({
-      ...storedEmailFilter("raterEmail", email),
+      ...emailMatchQuery("raterEmail", email),
       submittedAt: { $ne: null },
     }).select("eventId targetEmail ratings").lean();
 
@@ -511,14 +533,7 @@ exports.getStudentDashboard = async (req, res) => {
           .filter(Boolean))];
         const accountNames = new Map();
         if (unnamedEmails.length) {
-          const accounts = await Student.find({
-            $expr: {
-              $in: [
-                cleanedStoredEmail("$email"),
-                unnamedEmails,
-              ],
-            },
-          }).select("email name").lean();
+          const accounts = await Student.find(emailMatchQuery("email", unnamedEmails)).select("email name").lean();
           for (const account of accounts) {
             const accountName = String(account.name || "").trim();
             if (accountName) accountNames.set(storedAddress(account.email), accountName);
@@ -562,9 +577,12 @@ exports.getLeaderboard = async (req, res) => {
   try {
     const email = storedAddress(req.user?.email);
     if (!email) return res.status(400).json({ ok: false, message: "No email in token" });
-    const student = await Student.findOne({ $expr: storedEmailEquals("$email", email) }).select("universityId").lean();
+    // Keep these lookups shallow. A $expr that nests $replaceAll for every
+    // whitespace character exceeds Atlas's BSON nesting limit and the
+    // leaderboard request fails before any ranking is returned.
+    const student = await Student.findOne(emailMatchQuery("email", email)).select("universityId").lean();
     const universityRaw = student?.universityId || null;
-    const memberships = await Participant.find({ $expr: storedEmailEquals("$email", email) }).select("eventId").lean();
+    const memberships = await Participant.find(emailMatchQuery("email", email)).select("eventId").lean();
     const joinedEventIds = [...new Set(memberships.flatMap((row) => {
       if (!row.eventId) return [];
       const asString = String(row.eventId);
@@ -578,7 +596,9 @@ exports.getLeaderboard = async (req, res) => {
     }
     if (joinedEventIds.length) or.push({ _id: { $in: joinedEventIds } });
     const events = or.length
-      ? await Event.find({ status: { $in: ["PUBLISHED", "CLOSED"] }, $or: or }).lean()
+      ? await Event.find({ status: { $in: ["PUBLISHED", "CLOSED"] }, $or: or })
+        .select("name status closeAtActual skills scoringConfig frozenScores")
+        .lean()
       : [];
     const boards = [];
     const perStudent = new Map();
@@ -632,14 +652,7 @@ exports.getLeaderboard = async (req, res) => {
       ...perStudent.keys(),
     ])].filter(Boolean);
     const students = neededEmails.length
-      ? await Student.find({
-        $expr: {
-          $in: [
-            cleanedStoredEmail("$email"),
-            neededEmails,
-          ],
-        },
-      }).select("email name photoUrl").lean()
+      ? await Student.find(emailMatchQuery("email", neededEmails)).select("email name photoUrl").lean()
       : [];
     byEmail = new Map(
       students
@@ -686,7 +699,7 @@ exports.registerForEvent = async (req, res) => {
   try {
     const email = storedAddress(req.user?.email);
     if (!email) return res.status(400).json({ ok: false, message: "No email in token" });
-    const event = await Event.findById(req.params.eventId);
+    const event = await Event.findById(req.params.eventId, STUDENT_EVENT_READ);
     if (!event || event.status !== "PUBLISHED" || computeEffectiveStatus(event) === "CLOSED") {
       return res.status(404).json({ ok: false, message: "Open event not found" });
     }
@@ -705,13 +718,13 @@ exports.registerForEvent = async (req, res) => {
     if (committeeRow?.allowedLevels?.length && !canonicalChoice(level, committeeRow.allowedLevels)) {
       return res.status(400).json({ ok: false, message: "That level is not on the chosen committee" });
     }
-    const student = await Student.findOne({ $expr: storedEmailEquals("$email", email) }).lean();
+    const student = await Student.findOne(emailMatchQuery("email", email)).lean();
     const accountName = String(student?.name || req.user?.name || "").trim();
     const set = { level, committee, email };
     if (accountName) set.name = accountName;
     const existing = await Participant.findOne({
       eventId: event._id,
-      $expr: storedEmailEquals("$email", email),
+      ...emailMatchQuery("email", email),
     }).lean();
     if (existing) {
       await Participant.updateOne({ _id: existing._id }, { $set: set });
@@ -720,7 +733,7 @@ exports.registerForEvent = async (req, res) => {
         { eventId: event._id, email },
         {
           $set: set,
-          $setOnInsert: { eventId: event._id, email },
+          $setOnInsert: { eventId: event._id },
         },
         { upsert: true }
       );
@@ -938,6 +951,8 @@ exports.uploadStudentPhoto = async (req, res) => {
 };
 
 exports.skillHistoryFromEvents = skillHistoryFromEvents;
+exports.publicSkillRecord = publicSkillRecord;
+exports.publicSkillHistory = publicSkillHistory;
 exports.compareLeaderboardRows = compareLeaderboardRows;
 exports.overallScaleBoards = overallScaleBoards;
 exports.rankedOverall = rankedOverall;
@@ -989,7 +1004,7 @@ exports.getEventTeam = async (req, res) => {
       return res.status(400).json({ ok: false, message: "No email in token" });
     }
 
-    const event = await Event.findById(eventId).lean();
+    const event = await Event.findById(eventId, STUDENT_EVENT_READ).lean();
     if (!event) {
       return res.status(404).json({ ok: false, message: "Event not found" });
     }
@@ -997,7 +1012,7 @@ exports.getEventTeam = async (req, res) => {
     const normalizedRaterEmail = storedAddress(raterEmail);
     const raterParticipant = await Participant.findOne({
       eventId: event._id,
-      $expr: storedEmailEquals("$email", normalizedRaterEmail),
+      ...emailMatchQuery("email", normalizedRaterEmail),
     }).lean();
 
     if (!raterParticipant) {
@@ -1027,16 +1042,7 @@ exports.getEventTeam = async (req, res) => {
 
     const students = participantEmails.length
       ? await Student.aggregate([
-          {
-            $match: {
-              $expr: {
-                $in: [
-                  cleanedStoredEmail("$email"),
-                  participantEmails,
-                ],
-              },
-            },
-          },
+          { $match: emailMatchQuery("email", participantEmails) },
           {
             $project: {
               email: 1,
@@ -1059,7 +1065,7 @@ exports.getEventTeam = async (req, res) => {
     const submissions = await FeedbackSubmission.find({
       eventId: event._id,
       submittedAt: { $ne: null },
-      $expr: storedEmailEquals("$raterEmail", normalizedRaterEmail),
+      ...emailMatchQuery("raterEmail", normalizedRaterEmail),
     })
       .select("targetEmail ratings")
       .lean();
@@ -1107,6 +1113,7 @@ exports.getEventTeam = async (req, res) => {
         scaleMax: ratingScale(event.scoringConfig)?.max ?? null,
         feedbackOpen: !feedbackWindowClosed(event) && eventSkills.length > 0,
         feedbackWindow: feedbackWindowState(event),
+        showComments: event.scoringConfig?.showComments === true,
       },
       items,
     });
@@ -1141,7 +1148,7 @@ exports.submitEventFeedback = async (req, res) => {
       return res.status(400).json({ ok: false, message: "ratings must be an array" });
     }
 
-    const event = await Event.findById(eventId).lean();
+    const event = await Event.findById(eventId, STUDENT_EVENT_READ).lean();
     if (!event) {
       return res.status(404).json({ ok: false, message: "Event not found" });
     }
@@ -1164,7 +1171,7 @@ exports.submitEventFeedback = async (req, res) => {
     const normalizedTargetEmail = storedAddress(targetEmail);
     const raterParticipant = await Participant.findOne({
       eventId: event._id,
-      $expr: storedEmailEquals("$email", normalizedRaterEmail),
+      ...emailMatchQuery("email", normalizedRaterEmail),
     }).lean();
 
     if (!raterParticipant) {
@@ -1174,7 +1181,7 @@ exports.submitEventFeedback = async (req, res) => {
     // validate target is participant of this event
     const targetParticipant = await Participant.findOne({
       eventId: event._id,
-      $expr: storedEmailEquals("$email", normalizedTargetEmail),
+      ...emailMatchQuery("email", normalizedTargetEmail),
     }).lean();
 
     if (!targetParticipant) {
@@ -1206,7 +1213,9 @@ exports.submitEventFeedback = async (req, res) => {
         skill,
         score: submittedScore(rating.score),
         skipped: !!rating.skipped,
-        comment: rating.comment ? String(rating.comment).trim() : null,
+        comment: event.scoringConfig?.showComments === true && rating.comment
+          ? String(rating.comment).trim()
+          : null,
       };
       sanitized.push(r);
 
@@ -1233,12 +1242,8 @@ exports.submitEventFeedback = async (req, res) => {
     const existing = await FeedbackSubmission.findOne({
       eventId: event._id,
       submittedAt: { $ne: null },
-      $expr: {
-        $and: [
-          storedEmailEquals("$raterEmail", normalizedRaterEmail),
-          storedEmailEquals("$targetEmail", normalizedTargetEmail),
-        ],
-      },
+      ...emailMatchQuery("raterEmail", normalizedRaterEmail),
+      ...emailMatchQuery("targetEmail", normalizedTargetEmail),
     });
 
     if (existing) {

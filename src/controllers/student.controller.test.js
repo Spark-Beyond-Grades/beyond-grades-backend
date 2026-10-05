@@ -10,7 +10,7 @@ const University = require("../models/University");
 process.env.CLOUDINARY_URL ||= "cloudinary://key:secret@example";
 process.env.DO_SPACES_CDN_BASE ||= "https://cdn.example.com";
 
-const { getEventDetail, getEventTeam, syncStudent, updateProfile, getStudentDashboard, getPublicDashboardProfile, registerForEvent, submitEventFeedback, getLeaderboard, getDashboardPrivacy, skillHistoryFromEvents, compareLeaderboardRows, overallScaleBoards, rankedOverall } = require("./student.controller");
+const { getEventDetail, getEventTeam, syncStudent, updateProfile, getStudentDashboard, getPublicDashboardProfile, registerForEvent, submitEventFeedback, getLeaderboard, getDashboardPrivacy, skillHistoryFromEvents, publicSkillRecord, publicSkillHistory, compareLeaderboardRows, overallScaleBoards, rankedOverall } = require("./student.controller");
 
 function queryResult(rows) {
   return {
@@ -30,7 +30,7 @@ test("getStudentDashboard returns server-calculated event and overall scores wit
 
   try {
     Participant.find = (query) => queryResult(
-      query.email === "target@example.com"
+      query.email?.test?.("  tar get@example.com  ")
         ? [{ eventId: "64f000000000000000000001", email: "target@example.com" }]
         : [
             { eventId: "64f000000000000000000001", email: "target@example.com", level: "Member", committee: "Ops" },
@@ -68,7 +68,7 @@ test("getStudentDashboard returns server-calculated event and overall scores wit
       },
     ]);
     FeedbackSubmission.find = (query) => queryResult(
-      query.$expr
+      query.raterEmail && !query.raterEmail.test("  tar get@example.com  ")
         ? []
         : [{
             eventId: "64f000000000000000000001",
@@ -184,6 +184,32 @@ test("skillHistoryFromEvents keeps each event score in date order without combin
   assert.equal(steady[0].direction, "flat");
 });
 
+test("a shared skill score does not name the event when event history is off", () => {
+  const event = { eventId: "event-1", eventName: "Launch Fest", scaleMin: 1, scaleMax: 10 };
+  const skill = { skill: "Planning", score: 8, confidence: 0.4 };
+  const hidden = publicSkillRecord(skill, event, false);
+  assert.equal(hidden.score, 8);
+  assert.equal(hidden.eventName, undefined);
+  assert.equal(hidden.eventId, undefined);
+  assert.equal(JSON.stringify(hidden).includes("Launch Fest"), false);
+  const named = publicSkillRecord(skill, event, true);
+  assert.equal(named.eventName, "Launch Fest");
+  assert.equal(named.eventId, "event-1");
+
+  const history = publicSkillHistory(skillHistoryFromEvents([{
+    eventId: "event-1",
+    eventName: "Launch Fest",
+    eventDate: "2026-04-01",
+    scaleMin: 1,
+    scaleMax: 10,
+    skills: [{ skill: "Planning", score: 8, confidence: 0.4 }],
+  }]), false);
+  assert.equal(history[0].points[0].score, 8);
+  assert.equal(history[0].points[0].eventName, undefined);
+  assert.equal(history[0].direction, "single");
+  assert.equal(JSON.stringify(history).includes("Launch Fest"), false);
+});
+
 test("getStudentDashboard keeps a skipped skill as unfinished feedback", async () => {
   const originals = {
     participantFind: Participant.find,
@@ -255,7 +281,9 @@ test("getStudentDashboard uses an account name when the roster name is blank", a
     await getStudentDashboard({ user: { email: "target@example.com" } }, response);
     assert.equal(response.body.pendingFeedback.length, 1);
     assert.equal(response.body.pendingFeedback[0].targetName, "Rater");
-    assert.deepEqual(accountQuery.$expr.$in[1], ["rater@example.com"]);
+    assert.equal(accountQuery.email.test("  Ra ter@example.com  "), true);
+    assert.equal(accountQuery.email.test("other@example.com"), false);
+    assert.equal(accountQuery.$expr, undefined);
     assert.equal(JSON.stringify(response.body).includes("rater@example.com"), false);
   } finally {
     Participant.find = originals.participantFind;
@@ -463,8 +491,9 @@ test("getStudentDashboard keeps a closed snapshot when later settings use a diff
     assert.equal(response.body.events[0].eventScore, 4);
     assert.equal(response.body.events[0].frozenAt, "2026-03-01T00:00:00.000Z");
     assert.equal(response.body.events[0].skills[0].score, 4);
-    assert.equal(response.body.events[0].crossEventRule, "none");
-    assert.equal(response.body.overall.reason, "cross_event_disabled");
+    assert.equal(response.body.events[0].crossEventRule, "confidence");
+    assert.equal(response.body.overall.score, 4);
+    assert.equal(response.body.overall.reason, null);
     assert.equal(response.body.pendingFeedback.length, 0);
     assert.equal(response.body.summary.pendingCount, 0);
   } finally {
@@ -684,6 +713,103 @@ test("getPublicDashboardProfile keeps a frozen calculation time when another joi
   }
 });
 
+test("getPublicDashboardProfile ignores an unshown skill score when dating the profile", async () => {
+  const originals = {
+    studentFindOne: Student.findOne,
+    participantFind: Participant.find,
+    feedbackFind: FeedbackSubmission.find,
+    eventFind: Event.find,
+  };
+  const frozenAt = "2026-03-01T00:00:00.000Z";
+  const scoringConfig = {
+    scaleMin: 1,
+    scaleMax: 10,
+    levelRanks: { Member: 1 },
+    levelInfluence: 0,
+    committeeWeightSame: 1,
+    committeeWeightTop: 1,
+    committeeWeightOther: 1,
+    relevance: { Ops: { Planning: 1 } },
+    credibilityEpsilon: 0.05,
+    credibilityShrinkage: 5,
+    confidencePrior: 5,
+    skillWeights: { Planning: 1 },
+    applyRelevanceToSkillWeights: false,
+    evenMedianRule: "average",
+    allowSelfRatings: false,
+    blankSkillPolicy: "ignoreSkill",
+    unscoredSkillPolicy: "exclude",
+    crossEventRule: "equal",
+    contributesToScoring: false,
+  };
+  try {
+    Student.findOne = () => ({
+      lean: async () => ({
+        email: "target@example.com",
+        name: "Ada",
+        dashboardPrivacy: { shareOverallScore: true, shareSkillScores: false, shareEventHistory: true, shareContributions: false },
+      }),
+    });
+    Participant.find = () => queryResult([
+      { eventId: "64f000000000000000000001", email: "target@example.com", level: "Member", committee: "Ops" },
+      { email: "rater@example.com", level: "Member", committee: "Ops" },
+    ]);
+    FeedbackSubmission.find = () => queryResult([{
+      eventId: "64f000000000000000000002",
+      raterEmail: "rater@example.com",
+      targetEmail: "target@example.com",
+      ratings: [{ skill: "Planning", score: 8, skipped: false }],
+      submittedAt: new Date(),
+    }]);
+    Event.find = () => queryResult([
+      {
+        _id: { toString: () => "64f000000000000000000001" },
+        name: "Launch Fest",
+        skills: ["Planning"],
+        status: "CLOSED",
+        frozenScores: {
+          formulaVersion: "epa-reindexed-v1",
+          frozenAt,
+          configured: true,
+          eligible: true,
+          scaleMin: 1,
+          scaleMax: 10,
+          crossEventRule: "equal",
+          participants: [{
+            email: "target@example.com",
+            eventScore: 8,
+            confidence: 0.5,
+            status: "READY",
+            scaleMin: 1,
+            scaleMax: 10,
+            skills: [{ skill: "Planning", score: 8, confidence: 0.5 }],
+          }],
+        },
+      },
+      {
+        _id: { toString: () => "64f000000000000000000002" },
+        name: "Skill Fest",
+        skills: ["Planning"],
+        status: "PUBLISHED",
+        scoringConfig,
+      },
+    ]);
+    const response = captureResponse();
+    await getPublicDashboardProfile({ params: { token: "shared-token" } }, response);
+    const profile = response.body.profile;
+    assert.equal(profile.calculatedAt, frozenAt);
+    assert.equal(profile.skills.length, 0);
+    assert.equal(profile.events.length, 1);
+    assert.equal(profile.events[0].eventName, "Launch Fest");
+    assert.equal(JSON.stringify(profile).includes("Skill Fest"), false);
+  } finally {
+    Student.findOne = originals.studentFindOne;
+    Participant.find = originals.participantFind;
+    FeedbackSubmission.find = originals.feedbackFind;
+    Event.find = originals.eventFind;
+  }
+});
+
 test("getPublicDashboardProfile keeps a skill score when the event has no EPA", async () => {
   const originals = {
     studentFindOne: Student.findOne,
@@ -818,7 +944,7 @@ test("getPublicDashboardProfile does not count a self review when self ratings a
       scoringConfig: { allowSelfRatings: false },
     }]);
     FeedbackSubmission.find = (query) => queryResult(
-      query.$expr
+      query.raterEmail
         ? [{
             eventId: "event-1",
             targetEmail: "target@example.com",
@@ -860,7 +986,7 @@ test("getPublicDashboardProfile does not count a skipped review as a contributio
       status: "PUBLISHED",
     }]);
     FeedbackSubmission.find = (query) => queryResult(
-      query.$expr
+      query.raterEmail
         ? [{ eventId: "event-1", ratings: [{ skill: "Planning", score: null, skipped: true }] }]
         : []
     );
@@ -977,8 +1103,8 @@ test("getPublicDashboardProfile keeps an unscored event in the overall rule chec
     const response = captureResponse();
     await getPublicDashboardProfile({ params: { token: "shared-token" } }, response);
     const profile = response.body.profile;
-    assert.equal(profile.overall.score, null);
-    assert.equal(profile.overall.reason, "mixed_cross_event_rules");
+    assert.equal(profile.overall.score, 8);
+    assert.equal(profile.overall.reason, null);
     assert.equal(profile.overall.auditStatus, "collecting");
     assert.equal(profile.events.length, 1);
     assert.equal(profile.events[0].eventName, "Launch Fest");
@@ -1177,19 +1303,21 @@ test("getEventTeam does not turn a missing rating minimum into zero", async () =
     await getEventTeam({ params: { eventId: "event-1" }, user: { email: "rater@example.com" } }, response);
     assert.equal(response.body.event.scaleMin, null);
     assert.equal(response.body.event.scaleMax, null);
+    assert.equal(response.body.event.showComments, false);
 
     Event.findById = () => ({
       lean: async () => ({
         _id: { toString: () => "event-1" },
         name: "Launch Fest",
         skills: ["Planning"],
-        scoringConfig: { scaleMin: 0, scaleMax: 5 },
+        scoringConfig: { scaleMin: 0, scaleMax: 5, showComments: true },
       }),
     });
     const zeroMinimum = captureResponse();
     await getEventTeam({ params: { eventId: "event-1" }, user: { email: "rater@example.com" } }, zeroMinimum);
     assert.equal(zeroMinimum.body.event.scaleMin, 0);
     assert.equal(zeroMinimum.body.event.scaleMax, 5);
+    assert.equal(zeroMinimum.body.event.showComments, true);
   } finally {
     Event.findById = originals.eventFindById;
     Participant.findOne = originals.participantFindOne;
@@ -1422,18 +1550,17 @@ test("getEventTeam finds a review stored with a lowercase email", async () => {
   };
   const eventId = "64f000000000000000000001";
   try {
-    let lookedUpEmail = null;
     Event.findById = () => ({ lean: async () => ({ _id: { toString: () => eventId }, name: "Launch Fest", skills: ["Planning"] }) });
     Participant.findOne = () => ({ lean: async () => ({ email: "rater@example.com" }) });
     Participant.find = () => queryResult([{ name: "Asha Rao", email: "asha@example.com", rollNumber: "", committee: "Ops", level: "Lead", position: "" }]);
     Student.aggregate = async () => [];
     FeedbackSubmission.find = (query) => {
-      lookedUpEmail = query.$expr.$eq[1];
+      assert.equal(query.raterEmail.test("rater@example.com"), true);
+      assert.equal(query.raterEmail.test(" Rater@Example.com "), true);
       return queryResult([{ targetEmail: "asha@example.com", ratings: [{ skill: "Planning", score: 4, skipped: false }] }]);
     };
     const res = { statusCode: null, body: null, status(code) { this.statusCode = code; return this; }, json(payload) { this.body = payload; return this; } };
     await getEventTeam({ params: { eventId }, user: { email: "Rater@Example.com" } }, res);
-    assert.strictEqual(lookedUpEmail, "rater@example.com");
     assert.strictEqual(res.body.items[0].feedbackComplete, true);
   } finally {
     Event.findById = originals.eventFindById;
@@ -1612,13 +1739,17 @@ test("getEventTeam rejects students who are not event participants", async () =>
   };
 
   try {
-    Event.findById = () => ({
-      lean: async () => ({
-        _id: { toString: () => "64f000000000000000000001" },
-        name: "Launch Fest",
-        skills: ["Planning"],
-      }),
-    });
+    Event.findById = (id, projection) => {
+      assert.equal(projection.frozenScoreHistory, 0);
+      assert.equal(projection.frozenScores, 0);
+      return {
+        lean: async () => ({
+          _id: { toString: () => "64f000000000000000000001" },
+          name: "Launch Fest",
+          skills: ["Planning"],
+        }),
+      };
+    };
     Participant.findOne = () => ({ lean: async () => null });
     Participant.find = () => {
       throw new Error("Participant list should not be queried for non-participants");
@@ -1662,7 +1793,9 @@ test("getEventDetail loads published event details for students who are not part
     Event.findById = async (id, projection) => {
       assert.equal(projection.frozenScoreHistory, 0);
       assert.equal(projection.frozenScores, 0);
-      return ({
+      assert.equal(projection.createdByEmail, 0);
+      assert.equal(projection.groupId, 0);
+      return {
       _id: { toString: () => "64f000000000000000000001" },
       name: "Launch Fest",
       status: "PUBLISHED",
@@ -1680,14 +1813,10 @@ test("getEventDetail loads published event details for students who are not part
           frozenScores: { participants: [{ email: "hidden@example.com", eventScore: 9 }] },
           frozenScoreHistory: [{ participants: [{ email: "hidden@example.com" }] }],
         };
-        },
-      });
+      },
     };
-    Participant.findOne = async (filter) => {
-      assert.equal(filter.$expr, undefined);
-      assert.equal(filter.email.test("outsider@example.com"), true);
-      return null;
     };
+    Participant.findOne = async () => null;
 
     const req = {
       params: { eventId: "64f000000000000000000001" },
@@ -1842,6 +1971,52 @@ test("submitEventFeedback keeps a rating that is only a rounding error past the 
       body: { targetEmail: "target@example.com", ratings: [{ skill: "Planning", score: 5.2, skipped: false }] },
     }, tooHigh);
     assert.equal(tooHigh.statusCode, 400);
+  } finally {
+    Event.findById = originals.findById;
+    Participant.findOne = originals.findOne;
+    FeedbackSubmission.findOne = originals.feedbackFindOne;
+    FeedbackSubmission.create = originals.create;
+  }
+});
+
+test("submitEventFeedback drops a comment unless the organizer shows comments", async () => {
+  const originals = {
+    findById: Event.findById,
+    findOne: Participant.findOne,
+    feedbackFindOne: FeedbackSubmission.findOne,
+    create: FeedbackSubmission.create,
+  };
+  let saved;
+  try {
+    Event.findById = () => ({
+      lean: async () => ({ _id: "event-1", skills: ["Planning"], scoringConfig: { scaleMin: 1, scaleMax: 5 } }),
+    });
+    Participant.findOne = () => ({ lean: async () => ({ email: "person@example.com" }) });
+    FeedbackSubmission.findOne = async () => null;
+    FeedbackSubmission.create = async (doc) => {
+      saved = doc;
+      return { _id: { toString: () => "sub-1" }, submittedAt: doc.submittedAt };
+    };
+    const hidden = captureResponse();
+    await submitEventFeedback({
+      params: { eventId: "event-1" },
+      user: { email: "rater@example.com" },
+      body: { targetEmail: "target@example.com", ratings: [{ skill: "Planning", score: 4, skipped: false, comment: "Nice work" }] },
+    }, hidden);
+    assert.equal(hidden.statusCode, 200);
+    assert.equal(saved.ratings[0].comment, null);
+
+    Event.findById = () => ({
+      lean: async () => ({ _id: "event-1", skills: ["Planning"], scoringConfig: { scaleMin: 1, scaleMax: 5, showComments: true } }),
+    });
+    const shown = captureResponse();
+    await submitEventFeedback({
+      params: { eventId: "event-1" },
+      user: { email: "rater@example.com" },
+      body: { targetEmail: "target@example.com", ratings: [{ skill: "Planning", score: 4, skipped: false, comment: " Nice work " }] },
+    }, shown);
+    assert.equal(shown.statusCode, 200);
+    assert.equal(saved.ratings[0].comment, "Nice work");
   } finally {
     Event.findById = originals.findById;
     Participant.findOne = originals.findOne;
@@ -2131,6 +2306,9 @@ test("registerForEvent stores the organizer spelling when the join labels differ
     assert.equal(response.body.ok, true);
     assert.equal(written.$set.level, "Head");
     assert.equal(written.$set.committee, "Ops");
+    assert.equal(written.$set.email, "student@example.com");
+    assert.equal(written.$setOnInsert.email, undefined);
+    assert.equal(written.$setOnInsert.eventId, "event-1");
   } finally {
     Event.findById = originals.findById;
     Student.findOne = originals.studentFindOne;
@@ -2207,7 +2385,9 @@ test("registerForEvent updates a roster row whose email differs only by case", a
     Student.findOne = () => ({ lean: async () => ({ name: "Ada" }) });
     Participant.findOne = (query) => ({
       lean: async () => {
-        assert.equal(query.$expr.$eq[1], "student@example.com");
+        assert.equal(query.email.test("student@example.com"), true);
+        assert.equal(query.email.test(" Student@Example.com "), true);
+        assert.equal(query.eventId, "event-1");
         return { _id: "row-1", email: "Student@Example.com" };
       },
     });
@@ -2373,6 +2553,41 @@ test("getLeaderboard keeps a closed score when the frozen email differs only by 
   }
 });
 
+test("getLeaderboard does not load frozen score history", async () => {
+  const originals = {
+    eventFind: Event.find,
+    participantFind: Participant.find,
+    feedbackFind: FeedbackSubmission.find,
+    studentFind: Student.find,
+    studentFindOne: Student.findOne,
+  };
+  let selected = "";
+  try {
+    Student.findOne = () => ({ select: () => ({ lean: async () => ({ universityId: "uni-1" }) }) });
+    Student.find = () => ({ select: () => ({ lean: async () => [] }) });
+    Participant.find = () => queryResult([{ eventId: "64f000000000000000000001" }]);
+    FeedbackSubmission.find = () => queryResult([]);
+    Event.find = () => ({
+      select(fields) {
+        selected = fields;
+        return this;
+      },
+      lean: async () => [],
+    });
+    const response = createResponse();
+    await getLeaderboard({ user: { email: "student@example.com" } }, response);
+    assert.equal(response.statusCode, 200);
+    assert.equal(selected.includes("frozenScores"), true);
+    assert.equal(selected.includes("frozenScoreHistory"), false);
+  } finally {
+    Event.find = originals.eventFind;
+    Participant.find = originals.participantFind;
+    FeedbackSubmission.find = originals.feedbackFind;
+    Student.find = originals.studentFind;
+    Student.findOne = originals.studentFindOne;
+  }
+});
+
 test("getLeaderboard shows the student's university and joined events only", async () => {
   const originals = {
     eventFind: Event.find,
@@ -2393,16 +2608,17 @@ test("getLeaderboard shows the student's university and joined events only", asy
     scoringConfig: {},
   });
   try {
-    let lookedUpEmail = null;
     Student.findOne = (query) => {
-      lookedUpEmail = query.$expr.$eq[1];
+      assert.equal(query.email.test("student@example.com"), true);
+      assert.equal(query.email.test("  Student@Example.com  "), true);
+      assert.equal(query.$expr, undefined);
       return { select: () => ({ lean: async () => ({ universityId: { toString: () => "uni-home" } }) }) };
     };
     Student.find = () => ({
       select: () => ({ lean: async () => [{ email: "student@example.com", name: "Ada" }] }),
     });
     Participant.find = (query) => queryResult(
-      query.$expr
+      query.email
         ? [{ eventId: joinedId }]
         : [{ email: "student@example.com", level: "Member", committee: "Ops" }]
     );
@@ -2424,7 +2640,6 @@ test("getLeaderboard shows the student's university and joined events only", asy
     await getLeaderboard({ user: { email: "student@example.com" } }, response);
 
     assert.equal(response.statusCode, 200);
-    assert.equal(lookedUpEmail, "student@example.com");
     assert.equal(eventQuery.$or.some((clause) => clause.universityId?.toString() === "uni-home"), true);
     assert.equal(eventQuery.$or.some((clause) => (clause._id?.$in || []).map(String).includes(joinedId)), true);
     const names = response.body.events.map((item) => item.eventName).sort();
@@ -2657,8 +2872,13 @@ test("getLeaderboard uses an account name when the saved email has extra spaces"
     const ranked = response.body.events[0].rows.find((row) => row.score === 8);
     assert.equal(ranked.name, "Ada Lovelace");
     assert.equal(ranked.photoUrl, "https://cdn.example.com/ada.jpg");
-    assert.deepEqual(accountQuery.$expr.$in[1].sort(), ["ada@example.com", "rater@example.com"]);
-    assert.equal(JSON.stringify(accountQuery).includes("$replaceAll"), true);
+    const patterns = (accountQuery.$or || [accountQuery]).map((clause) => clause.email);
+    assert.equal(patterns.length, 2);
+    assert.equal(patterns.some((pattern) => pattern.test("  Ada @Example.com  ")), true);
+    assert.equal(patterns.some((pattern) => pattern.test("Rater@Example.com")), true);
+    assert.equal(patterns.every((pattern) => pattern.test("other@example.com")), false);
+    assert.equal(JSON.stringify(accountQuery).includes("$expr"), false);
+    assert.equal(JSON.stringify(accountQuery).includes("$replaceAll"), false);
     assert.equal(response.body.overall[0].name, "Ada Lovelace");
     assert.equal(JSON.stringify(response.body).includes("Ada@Example.com"), false);
   } finally {

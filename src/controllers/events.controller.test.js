@@ -11,7 +11,7 @@ const Student = require("../models/Student");
 
 const Authority = require("../models/Authority");
 const University = require("../models/University");
-const { getStudentFeed, listEvents, publishEvent, deleteEvent, recalculateEventScores, uploadParticipantsCsv, removeParticipant, closeEvent, previewEventScores, getFeedbackSummary, getSuggestions, updateEvent, getEventById } = require("./events.controller");
+const { getStudentFeed, listEvents, publishEvent, deleteEvent, recalculateEventScores, uploadParticipantsCsv, removeParticipant, closeEvent, previewEventScores, getFeedbackSummary, getSuggestions, updateEvent, getEventById, getParticipants, uploadEventPoster, uploadEventLogo } = require("./events.controller");
 
 const HOME_UNIVERSITY_ID = "64f000000000000000000001";
 const OUTSIDE_UNIVERSITY_ID = "64f000000000000000000002";
@@ -51,8 +51,9 @@ test("listEvents returns draft and published authority events for the group", as
       authorityEventRecord("64f000000000000000000022", "Live event", "PUBLISHED"),
     ];
 
-    Event.find = (filter) => {
+    Event.find = (filter, projection) => {
       assert.deepStrictEqual(filter, { groupId: "authority-group" });
+      assert.equal(projection.frozenScoreHistory, 0);
       return {
         sort(sort) {
           assert.deepStrictEqual(sort, { createdAt: -1 });
@@ -94,9 +95,12 @@ test("getStudentFeed uses verified user uid instead of query uid", async () => {
       };
     };
 
-    Event.find = (filter) => {
+    Event.find = (filter, projection) => {
       assert.strictEqual(filter.status, "PUBLISHED");
       assert.deepStrictEqual(filter.$nor, [{ closeAtActual: { $exists: true, $ne: null } }]);
+      assert.strictEqual(projection.frozenScoreHistory, 0);
+      assert.strictEqual(projection.scoringConfig, 0);
+      assert.strictEqual(projection.frozenScores, 0);
       return {
         sort() {
           return this;
@@ -308,6 +312,8 @@ test("getStudentFeed uses Atlas Search pipeline for case-insensitive fuzzy searc
       assert.deepStrictEqual(pipeline[1].$match.$nor, [{ closeAtActual: { $exists: true, $ne: null } }]);
       assert.deepStrictEqual(pipeline[2], { $sort: { createdAt: -1, _id: -1 } });
       assert.deepStrictEqual(pipeline[3], { $limit: 21 });
+      assert.strictEqual(pipeline.at(-1).$project.frozenScoreHistory, 0);
+      assert.strictEqual(pipeline.at(-1).$project.scoringConfig, 0);
 
       return [
         eventRecord("64f000000000000000000011", "Sabrang", "2026-04-28T10:00:00.000Z", HOME_UNIVERSITY_ID),
@@ -338,8 +344,9 @@ test("getStudentFeed searches by text when the search index is unavailable", asy
       throw new Error("index not found");
     };
     let filter = null;
-    Event.find = (query) => {
+    Event.find = (query, projection) => {
       filter = query;
+      assert.strictEqual(projection.frozenScoreHistory, 0);
       return queryChain([
         eventRecord("64f000000000000000000011", "Sabrang", "2026-04-28T10:00:00.000Z", HOME_UNIVERSITY_ID),
       ]);
@@ -670,6 +677,27 @@ test("updateEvent rejects an event date that is not a real day", async () => {
   }
 });
 
+test("organizer edits do not load frozen score history", async () => {
+  const originalFindOne = Event.findOne;
+  const projections = [];
+  const req = { params: { id: "event-1" }, user: { groupId: "authority-group" }, body: { email: "ada@x.com" }, file: { buffer: Buffer.from("x"), originalname: "poster.png" } };
+  try {
+    Event.findOne = async (filter, projection) => {
+      projections.push(projection);
+      return null;
+    };
+    for (const handler of [updateEvent, publishEvent, uploadParticipantsCsv, removeParticipant, getParticipants, uploadEventPoster, uploadEventLogo]) {
+      const response = createResponse();
+      await handler(req, response);
+      assert.equal(response.statusCode, 404);
+    }
+    assert.equal(projections.length, 7);
+    for (const projection of projections) assert.equal(projection.frozenScoreHistory, 0);
+  } finally {
+    Event.findOne = originalFindOne;
+  }
+});
+
 test("updateEvent does not store a blank scoring field as zero", async () => {
   const originalFindOne = Event.findOne;
   let saved = false;
@@ -772,8 +800,12 @@ test("updateEvent rejects a committee weight below zero and keeps a negative lev
 
 test("getEventById shows a saved rank under the event's own spelling", async () => {
   const originalFindOne = Event.findOne;
+  const originalAggregate = Event.aggregate;
   try {
-    Event.findOne = async () => ({
+    Event.aggregate = async () => [{ frozenAt: [] }];
+    Event.findOne = async (filter, projection) => {
+      assert.equal(projection.frozenScoreHistory, 0);
+      return {
       status: "PUBLISHED",
       closeAtActual: null,
       levels: ["Head", " head "],
@@ -793,7 +825,8 @@ test("getEventById shows a saved rank under the event's own spelling", async () 
           scoringConfig: this.scoringConfig,
         };
       },
-    });
+    };
+    };
     const response = createResponse();
     await getEventById({ params: { id: "event-1" }, user: { groupId: "authority-group" } }, response);
     assert.equal(response.statusCode, 200);
@@ -802,8 +835,36 @@ test("getEventById shows a saved rank under the event's own spelling", async () 
     assert.deepEqual(response.body.event.scoringConfig.levelRanks, { Head: 4 });
     assert.deepEqual(response.body.event.scoringConfig.skillWeights, { Planning: 2 });
     assert.deepEqual(response.body.event.scoringConfig.relevance, { Ops: { Planning: 1 } });
+    assert.deepEqual(response.body.event.frozenScoreHistory, []);
   } finally {
     Event.findOne = originalFindOne;
+    Event.aggregate = originalAggregate;
+  }
+});
+
+test("getEventById returns freeze times without the stored score snapshots", async () => {
+  const originals = { findOne: Event.findOne, aggregate: Event.aggregate };
+  try {
+    Event.findOne = async () => ({
+      _id: "event-1",
+      status: "CLOSED",
+      toObject() { return { status: "CLOSED", name: "Launch Fest" }; },
+    });
+    Event.aggregate = async (pipeline) => {
+      assert.equal(pipeline[1].$project.frozenAt, "$frozenScoreHistory.frozenAt");
+      return [{ frozenAt: ["2026-03-01T00:00:00.000Z", null] }];
+    };
+    const response = createResponse();
+    await getEventById({ params: { id: "event-1" }, user: { groupId: "authority-group" } }, response);
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(response.body.event.frozenScoreHistory, [
+      { frozenAt: "2026-03-01T00:00:00.000Z" },
+      { frozenAt: null },
+    ]);
+    assert.equal(JSON.stringify(response.body).includes("participants"), false);
+  } finally {
+    Event.findOne = originals.findOne;
+    Event.aggregate = originals.aggregate;
   }
 });
 
@@ -871,10 +932,10 @@ test("removeParticipant drops the person and their reviews before the event is c
       body: { email: " ada @Example.com " },
     }, response);
     assert.equal(response.statusCode, 200);
-    assert.equal(removed[0].$expr.$eq[1], "ada@example.com");
-    assert.equal(JSON.stringify(removed[0]).includes("$email"), true);
-    assert.equal(removed[1].$or[0].$expr.$eq[1], "ada@example.com");
-    assert.equal(removed[1].$or[1].$expr.$eq[1], "ada@example.com");
+    assert.equal(removed[0].email.test(" ada @Example.com "), true);
+    assert.equal(removed[1].$or[0].raterEmail.test("ada@example.com"), true);
+    assert.equal(removed[1].$or[1].targetEmail.test("ada@example.com"), true);
+    assert.equal(JSON.stringify(removed).includes("$expr"), false);
   } finally {
     Event.findOne = originals.findOne;
     Participant.deleteMany = originals.deleteMany;
@@ -909,7 +970,35 @@ test("uploadParticipantsCsv matches committee and level labels and updates an ex
     assert.equal(written[0].updateOne.update.$set.name, "Ada");
     assert.equal(written[0].updateOne.update.$set.committee, "Hospitality");
     assert.equal(written[0].updateOne.update.$set.level, "Head");
-    assert.equal(written[0].updateOne.update.$setOnInsert.email, "ada@x.com");
+    assert.equal(written[0].updateOne.update.$set.email, "ada@x.com");
+    assert.equal(written[0].updateOne.update.$setOnInsert.email, undefined);
+    assert.equal(String(written[0].updateOne.update.$setOnInsert.eventId), "event-1");
+  } finally {
+    Event.findOne = originals.findOne;
+    Participant.find = originals.participantFind;
+    Participant.bulkWrite = originals.bulkWrite;
+  }
+});
+
+test("uploadParticipantsCsv keeps committee and level written before the event lists them", async () => {
+  const originals = { findOne: Event.findOne, participantFind: Participant.find, bulkWrite: Participant.bulkWrite };
+  let written;
+  try {
+    Event.findOne = async () => ({ _id: "event-1", committees: [], levels: [] });
+    Participant.find = () => ({ select: () => ({ lean: async () => [] }) });
+    Participant.bulkWrite = async (ops) => {
+      written = ops;
+      return { upsertedCount: 1 };
+    };
+    const response = createResponse();
+    await uploadParticipantsCsv({
+      params: { id: "event-1" },
+      user: { groupId: "authority-group" },
+      file: { buffer: Buffer.from("Name,Email,Committee,Level\nAda,ada@x.com,Hospitality,Head\n") },
+    }, response);
+    assert.equal(response.body.ok, true);
+    assert.equal(written[0].updateOne.update.$set.committee, "Hospitality");
+    assert.equal(written[0].updateOne.update.$set.level, "Head");
   } finally {
     Event.findOne = originals.findOne;
     Participant.find = originals.participantFind;
@@ -1285,8 +1374,9 @@ test("previewEventScores uses an account name when the roster name is blank", as
     const target = response.body.scored.participants.find((person) => person.email === "target@example.com");
     assert.equal(target.name, "Ada Lovelace");
     assert.equal(target.eventScore, 8);
-    assert.deepEqual(accountQuery.$expr.$in[1], ["target@example.com"]);
-    assert.equal(JSON.stringify(accountQuery).includes("$replaceAll"), true);
+    assert.equal(accountQuery.email.test("  Tar get@example.com  "), true);
+    assert.equal(accountQuery.email.test("other@example.com"), false);
+    assert.equal(accountQuery.$expr, undefined);
   } finally {
     Event.findOne = originals.findOne;
     Participant.find = originals.participantFind;
@@ -1360,14 +1450,18 @@ test("previewEventScores still returns scores when the account name lookup fails
 test("getFeedbackSummary counts a review stored under a different skill capitalization", async () => {
   const originals = { eventFind: Event.find, participantFind: Participant.find, feedbackFind: FeedbackSubmission.find };
   try {
-    Event.find = () => ({
-      sort: async () => [{
-        _id: "event-1",
-        status: "PUBLISHED",
-        skills: ["Planning"],
-        toObject() { return { name: "Launch Fest", skills: this.skills, status: this.status }; },
-      }],
-    });
+    Event.find = (filter, projection) => {
+      assert.strictEqual(projection.frozenScoreHistory, 0);
+      assert.deepStrictEqual(filter.status.$in, ["PUBLISHED", "CLOSED"]);
+      return {
+        sort: async () => [{
+          _id: "event-1",
+          status: "PUBLISHED",
+          skills: ["Planning"],
+          toObject() { return { name: "Launch Fest", skills: this.skills, status: this.status }; },
+        }],
+      };
+    };
     Participant.find = () => ({
       lean: async () => [
         { email: "ada@x.com", name: "Ada" },
@@ -1531,7 +1625,8 @@ test("getFeedbackSummary does not require reviews when the event has no skills",
     assert.equal(summary.fullySubmittedCount, 2);
     assert.equal(summary.notStartedCount, 0);
     assert.equal(summary.participants.find((person) => person.email === "bea@x.com").name, "Bea");
-    assert.deepEqual(accountQuery.$expr.$in[1], ["bea@x.com"]);
+    assert.equal(accountQuery.email.test(" Bea@X.com "), true);
+    assert.equal(accountQuery.email.test("ada@x.com"), false);
   } finally {
     Event.find = originals.eventFind;
     Participant.find = originals.participantFind;
@@ -1837,6 +1932,52 @@ test("recalculateEventScores keeps the previous snapshot in audit history", asyn
     assert.equal(event.frozenScores.configured, false);
   } finally {
     Event.findOne = originals.findOne;
+    Participant.find = originals.participantFind;
+    FeedbackSubmission.find = originals.feedbackFind;
+  }
+});
+
+test("recalculateEventScores appends the previous snapshot without loading stored history", async () => {
+  const originals = {
+    findOne: Event.findOne,
+    updateOne: Event.updateOne,
+    aggregate: Event.aggregate,
+    participantFind: Participant.find,
+    feedbackFind: FeedbackSubmission.find,
+  };
+  const previous = { formulaVersion: "epa-reindexed-v1", participants: [{ eventScore: 4 }], frozenAt: "earlier" };
+  let update = null;
+  try {
+    Event.findOne = async (filter, projection) => {
+      assert.equal(projection.frozenScoreHistory, 0);
+      return {
+        _id: "event-1",
+        skills: [],
+        scoringConfig: null,
+        frozenScores: previous,
+        markModified() {},
+        async save() {},
+      };
+    };
+    Event.updateOne = async (filter, change) => {
+      update = { filter, change };
+    };
+    Event.aggregate = async () => [{ frozenAt: ["earlier", "2026-04-01T00:00:00.000Z"] }];
+    Participant.find = () => ({ lean: async () => [] });
+    FeedbackSubmission.find = () => ({ lean: async () => [] });
+    const response = createResponse();
+    await recalculateEventScores({ params: { id: "event-1" }, user: { groupId: "authority-group" } }, response);
+    assert.equal(response.body.ok, true);
+    assert.equal(update.change.$push.frozenScoreHistory, previous);
+    assert.deepEqual(response.body.history, [
+      { frozenAt: "earlier" },
+      { frozenAt: "2026-04-01T00:00:00.000Z" },
+    ]);
+    assert.equal(JSON.stringify(response.body.history).includes("eventScore"), false);
+  } finally {
+    Event.findOne = originals.findOne;
+    Event.updateOne = originals.updateOne;
+    Event.aggregate = originals.aggregate;
     Participant.find = originals.participantFind;
     FeedbackSubmission.find = originals.feedbackFind;
   }

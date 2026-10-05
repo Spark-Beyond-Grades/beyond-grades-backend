@@ -10,7 +10,7 @@ const { parse } = require("csv-parse/sync");
 const FeedbackSubmission = require("../models/FeedbackSubmission");
 const { scoreEvent, auditStatus, uniqueParticipants, alignScoringConfigToStructure } = require("../utils/epaFormula");
 const { cell, canonicalChoice, cleanEmail, uniqueSkills, canonicalEventStructure, unmatchedAllowedLevel } = require("../utils/csvMatch");
-const { storedEmailEquals, sameStoredEmail, cleanedStoredEmail } = require("../utils/emailQuery");
+const { emailMatchQuery } = require("../utils/emailQuery");
 const { calendarDate } = require("../utils/calendarDate");
 
 function reviewIsComplete(submission, skills) {
@@ -21,6 +21,24 @@ function reviewIsComplete(submission, skills) {
     if (rating.score === null || rating.score === undefined || rating.score === false || rating.score === true) return false;
     return Number.isFinite(Number(typeof rating.score === "string" ? rating.score.trim() : rating.score));
   }));
+}
+
+async function archivePreviousSnapshot(event) {
+  if (!event.frozenScores) return;
+  if (Array.isArray(event.frozenScoreHistory)) {
+    event.frozenScoreHistory = [...event.frozenScoreHistory, event.frozenScores];
+    event.markModified?.("frozenScoreHistory");
+    return;
+  }
+  await Event.updateOne({ _id: event._id }, { $push: { frozenScoreHistory: event.frozenScores } });
+}
+
+async function scoreHistoryTimes(eventId) {
+  const [row] = await Event.aggregate([
+    { $match: { _id: eventId } },
+    { $project: { _id: 0, frozenAt: "$frozenScoreHistory.frozenAt" } },
+  ]);
+  return (row?.frozenAt || []).map((frozenAt) => ({ frozenAt: frozenAt || null }));
 }
 
 function presentAuthorityEvent(event, extra = {}) {
@@ -50,14 +68,7 @@ async function withParticipantNames(scored, participants) {
   const missing = roster.filter((person) => person.email && !names.get(person.email)).map((person) => person.email);
   if (missing.length) {
     try {
-      const accounts = await Student.find({
-        $expr: {
-          $in: [
-            cleanedStoredEmail("$email"),
-            missing,
-          ],
-        },
-      }).select("email name").lean();
+      const accounts = await Student.find(emailMatchQuery("email", missing)).select("email name").lean();
       for (const account of accounts) {
         const email = cleanEmail(account.email);
         const accountName = String(account.name || "").trim();
@@ -219,6 +230,13 @@ function sanitizeScoringConfig(input) {
   return { config, invalid };
 }
 
+const STUDENT_FEED_HIDDEN = {
+  frozenScoreHistory: 0,
+  frozenScores: 0,
+  scoringConfig: 0,
+  createdByEmail: 0,
+  groupId: 0,
+};
 const STUDENT_FEED_DEFAULT_LIMIT = 20;
 const STUDENT_FEED_COMPAT_LIMIT = 50;
 const STUDENT_FEED_MAX_LIMIT = 50;
@@ -375,6 +393,7 @@ async function fetchStudentFeedEvents(options, studentUniversityId) {
     }
     pipeline.push({ $sort: { createdAt: -1, _id: -1 } });
     pipeline.push({ $limit: options.limit + 1 });
+    pipeline.push({ $project: STUDENT_FEED_HIDDEN });
 
     try {
       return await Event.aggregate(pipeline);
@@ -389,7 +408,7 @@ async function fetchStudentFeedEvents(options, studentUniversityId) {
     Object.assign(filter, cursorCriteria);
   }
 
-  return Event.find(filter)
+  return Event.find(filter, STUDENT_FEED_HIDDEN)
     .sort({ createdAt: -1, _id: -1 })
     .limit(options.limit + 1);
 }
@@ -403,7 +422,7 @@ function fetchStudentFeedByText(options, studentUniversityId, cursorCriteria) {
   const pattern = new RegExp(escapeSearchText(options.q), "i");
   filter.$or = STUDENT_FEED_SEARCH_PATHS.map((path) => ({ [path]: pattern }));
   const query = cursorCriteria ? { $and: [filter, cursorCriteria] } : filter;
-  return Event.find(query)
+  return Event.find(query, STUDENT_FEED_HIDDEN)
     .sort({ createdAt: -1, _id: -1 })
     .limit(options.limit + 1);
 }
@@ -413,7 +432,7 @@ exports.createDraftEvent = async (req, res) => {
   try {
     const { name = "", type = "OTHER", description = "", templateId = "T1", minAppBuild = 1 } = req.body || {};
 
-    const authority = await Authority.findOne(sameStoredEmail("$email", req.user.email));
+    const authority = await Authority.findOne(emailMatchQuery("email", req.user.email));
     if (!authority) return res.status(403).json({ ok: false, message: "Not an authority" });
 
     if (!authority.universityId) {
@@ -448,7 +467,7 @@ exports.listEvents = async (req, res) => {
   try {
     const events = await Event.find({
       groupId: req.user.groupId,
-    }).sort({ createdAt: -1 });
+    }, { frozenScoreHistory: 0 }).sort({ createdAt: -1 });
 
     const mapped = events.map((e) => presentAuthorityEvent(e));
 
@@ -465,7 +484,7 @@ exports.updateEvent = async (req, res) => {
     const { name, type, description, eventStartDate, eventEndDate, venue, openAt, closeAtTentative, levels, committees, skills, posterUrl, logoUrl, scoringConfig } =
       req.body || {};
 
-    const event = await Event.findOne({ _id: req.params.id, groupId: req.user.groupId });
+    const event = await Event.findOne({ _id: req.params.id, groupId: req.user.groupId }, { frozenScoreHistory: 0 });
     if (!event) return res.status(404).json({ ok: false, message: "Event not found" });
 
     if (event.status === "CLOSED" || event.closeAtActual) {
@@ -575,7 +594,7 @@ exports.updateEvent = async (req, res) => {
 // GET /events/:id/participants
 exports.getParticipants = async (req, res) => {
   try {
-    const event = await Event.findOne({ _id: req.params.id, groupId: req.user.groupId });
+    const event = await Event.findOne({ _id: req.params.id, groupId: req.user.groupId }, { frozenScoreHistory: 0 });
     if (!event) return res.status(404).json({ ok: false, message: "Event not found" });
 
     const participants = await Participant.find({ eventId: event._id }).sort({ createdAt: -1 });
@@ -592,7 +611,7 @@ exports.removeParticipant = async (req, res) => {
     const email = cleanEmail(req.body?.email || "");
     if (!email) return res.status(400).json({ ok: false, message: "Email is required" });
 
-    const event = await Event.findOne({ _id: req.params.id, groupId: req.user.groupId });
+    const event = await Event.findOne({ _id: req.params.id, groupId: req.user.groupId }, { frozenScoreHistory: 0 });
     if (!event) return res.status(404).json({ ok: false, message: "Event not found" });
     if (event.status === "CLOSED" || event.closeAtActual) {
       return res.status(400).json({ ok: false, message: "Event is closed and its participant list is locked" });
@@ -600,14 +619,14 @@ exports.removeParticipant = async (req, res) => {
 
     const removed = await Participant.deleteMany({
       eventId: event._id,
-      $expr: storedEmailEquals("$email", email),
+      ...emailMatchQuery("email", email),
     });
     if (!removed.deletedCount) return res.status(404).json({ ok: false, message: "Participant not found" });
     await FeedbackSubmission.deleteMany({
       eventId: event._id,
       $or: [
-        { $expr: storedEmailEquals("$raterEmail", email) },
-        { $expr: storedEmailEquals("$targetEmail", email) },
+        emailMatchQuery("raterEmail", email),
+        emailMatchQuery("targetEmail", email),
       ],
     });
     return res.json({ ok: true });
@@ -622,7 +641,7 @@ exports.uploadParticipantsCsv = async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ ok: false, message: "CSV file is required" });
 
-    const event = await Event.findOne({ _id: req.params.id, groupId: req.user.groupId });
+    const event = await Event.findOne({ _id: req.params.id, groupId: req.user.groupId }, { frozenScoreHistory: 0 });
     if (!event) return res.status(404).json({ ok: false, message: "Event not found" });
     if (event.status === "CLOSED" || event.closeAtActual) {
       return res.status(400).json({ ok: false, message: "Event is closed and its participant list is locked" });
@@ -657,8 +676,8 @@ exports.uploadParticipantsCsv = async (req, res) => {
       const committeeInput = cell(row, ["committee", "committee name"]).trim();
       const levelInput = cell(row, ["level"]).trim();
       const position = cell(row, ["position"]).trim();
-      const committee = canonicalChoice(committeeInput, committeeOptions);
-      const level = canonicalChoice(levelInput, levelOptions);
+      const committee = committeeOptions.length ? canonicalChoice(committeeInput, committeeOptions) : committeeInput;
+      const level = levelOptions.length ? canonicalChoice(levelInput, levelOptions) : levelInput;
 
       if (!email) {
         errors.push({ row: i + 2, field: "email", message: "Missing email" });
@@ -729,7 +748,7 @@ exports.uploadParticipantsCsv = async (req, res) => {
       return {
         updateOne: {
           filter: { eventId: d.eventId, email: d.email },
-          update: { $set: set, $setOnInsert: { eventId: d.eventId, email: d.email } },
+          update: { $set: set, $setOnInsert: { eventId: d.eventId } },
           upsert: true,
         },
       };
@@ -752,7 +771,7 @@ exports.uploadParticipantsCsv = async (req, res) => {
 // POST /events/:id/publish
 exports.publishEvent = async (req, res) => {
   try {
-    const event = await Event.findOne({ _id: req.params.id, groupId: req.user.groupId });
+    const event = await Event.findOne({ _id: req.params.id, groupId: req.user.groupId }, { frozenScoreHistory: 0 });
     if (!event) return res.status(404).json({ ok: false, message: "Event not found" });
 
     if (event.status === "CLOSED" || event.closeAtActual) {
@@ -786,12 +805,15 @@ exports.publishEvent = async (req, res) => {
 // GET /events/:id
 exports.getEventById = async (req, res) => {
   try {
-    const event = await Event.findOne({ _id: req.params.id, groupId: req.user.groupId });
+    const event = await Event.findOne({ _id: req.params.id, groupId: req.user.groupId }, { frozenScoreHistory: 0 });
     if (!event) return res.status(404).json({ ok: false, message: "Event not found" });
 
     return res.json({
       ok: true,
-      event: presentAuthorityEvent(event),
+      event: {
+        ...presentAuthorityEvent(event),
+        frozenScoreHistory: await scoreHistoryTimes(event._id),
+      },
     });
   } catch (err) {
     console.error("❌ getEventById:", err.message);
@@ -801,7 +823,7 @@ exports.getEventById = async (req, res) => {
 
 exports.deleteEvent = async (req, res) => {
   try {
-    const event = await Event.findOne({ _id: req.params.id, groupId: req.user.groupId });
+    const event = await Event.findOne({ _id: req.params.id, groupId: req.user.groupId }, { frozenScoreHistory: 0 });
     if (!event) return res.status(404).json({ ok: false, message: "Event not found" });
     await Participant.deleteMany({ eventId: event._id });
     await FeedbackSubmission.deleteMany({ eventId: event._id });
@@ -815,7 +837,7 @@ exports.deleteEvent = async (req, res) => {
 
 exports.previewEventScores = async (req, res) => {
   try {
-    const event = await Event.findOne({ _id: req.params.id, groupId: req.user.groupId }).lean();
+    const event = await Event.findOne({ _id: req.params.id, groupId: req.user.groupId }, { frozenScoreHistory: 0 }).lean();
     if (!event) return res.status(404).json({ ok: false, message: "Event not found" });
     const participants = await Participant.find({ eventId: event._id }).lean();
     if ((event.status === "CLOSED" || event.closeAtActual) && event.frozenScores) {
@@ -839,11 +861,9 @@ exports.previewEventScores = async (req, res) => {
 
 exports.recalculateEventScores = async (req, res) => {
   try {
-    const event = await Event.findOne({ _id: req.params.id, groupId: req.user.groupId });
+    const event = await Event.findOne({ _id: req.params.id, groupId: req.user.groupId }, { frozenScoreHistory: 0 });
     if (!event) return res.status(404).json({ ok: false, message: "Event not found" });
-    if (event.frozenScores) {
-      event.frozenScoreHistory = [...(event.frozenScoreHistory || []), event.frozenScores];
-    }
+    await archivePreviousSnapshot(event);
     const participants = await Participant.find({ eventId: event._id }).lean();
     const submissions = await FeedbackSubmission.find({ eventId: event._id, submittedAt: { $ne: null } }).lean();
     event.frozenScores = await withParticipantNames({
@@ -856,9 +876,11 @@ exports.recalculateEventScores = async (req, res) => {
       frozenAt: new Date(),
     }, participants);
     event.markModified("frozenScores");
-    event.markModified("frozenScoreHistory");
     await event.save();
-    return res.json({ ok: true, frozenScores: event.frozenScores, history: event.frozenScoreHistory || [] });
+    const history = Array.isArray(event.frozenScoreHistory)
+      ? event.frozenScoreHistory
+      : await scoreHistoryTimes(event._id);
+    return res.json({ ok: true, frozenScores: event.frozenScores, history });
   } catch (err) {
     console.error("recalculateEventScores error:", err);
     return res.status(500).json({ ok: false, message: "Failed to recalculate scores" });
@@ -868,7 +890,7 @@ exports.recalculateEventScores = async (req, res) => {
 // POST /events/:id/close
 exports.closeEvent = async (req, res) => {
   try {
-    const event = await Event.findOne({ _id: req.params.id, groupId: req.user.groupId });
+    const event = await Event.findOne({ _id: req.params.id, groupId: req.user.groupId }, { frozenScoreHistory: 0 });
     if (!event) return res.status(404).json({ ok: false, message: "Event not found" });
 
     if (event.status !== "PUBLISHED" || event.closeAtActual) {
@@ -877,10 +899,8 @@ exports.closeEvent = async (req, res) => {
 
     event.status = "CLOSED";
     event.closeAtActual = new Date();
-    if (event.frozenScores) {
-      event.frozenScoreHistory = [...(event.frozenScoreHistory || []), event.frozenScores];
-      event.markModified("frozenScoreHistory");
-    }
+    const archivedWithoutLoading = Boolean(event.frozenScores) && !Array.isArray(event.frozenScoreHistory);
+    await archivePreviousSnapshot(event);
     const participants = await Participant.find({ eventId: event._id }).lean();
     const submissions = await FeedbackSubmission.find({ eventId: event._id, submittedAt: { $ne: null } }).lean();
     event.frozenScores = await withParticipantNames({
@@ -895,10 +915,14 @@ exports.closeEvent = async (req, res) => {
     event.markModified("frozenScores");
     await event.save();
 
+    const closedEvent = presentAuthorityEvent(event);
+    if (archivedWithoutLoading) {
+      closedEvent.frozenScoreHistory = await scoreHistoryTimes(event._id);
+    }
     return res.json({
       ok: true,
       message: "Event closed successfully",
-      event: presentAuthorityEvent(event),
+      event: closedEvent,
     });
   } catch (err) {
     console.error("❌ closeEvent:", err.message);
@@ -918,7 +942,7 @@ exports.uploadEventPoster = async (req, res) => {
     const event = await Event.findOne({
       _id: req.params.id,
       groupId: req.user.groupId,
-    });
+    }, { frozenScoreHistory: 0 });
     if (!event) {
       return res.status(404).json({ ok: false, message: "Event not found" });
     }
@@ -957,7 +981,7 @@ exports.uploadEventLogo = async (req, res) => {
     const event = await Event.findOne({
       _id: req.params.id,
       groupId: req.user.groupId,
-    });
+    }, { frozenScoreHistory: 0 });
     if (!event) {
       return res.status(404).json({ ok: false, message: "Event not found" });
     }
@@ -992,7 +1016,7 @@ exports.getFeedbackSummary = async (req, res) => {
     const events = await Event.find({
       groupId: req.user.groupId,
       status: { $in: ["PUBLISHED", "CLOSED"] },
-    }).sort({ createdAt: -1 });
+    }, { frozenScoreHistory: 0 }).sort({ createdAt: -1 });
 
     const summaries = await Promise.all(
       events.map(async (event) => {
@@ -1006,14 +1030,7 @@ exports.getFeedbackSummary = async (req, res) => {
           .map((person) => person.email);
         const accountNames = new Map();
         if (unnamed.length) {
-          const accounts = await Student.find({
-            $expr: {
-              $in: [
-                cleanedStoredEmail("$email"),
-                unnamed,
-              ],
-            },
-          }).select("email name").lean();
+          const accounts = await Student.find(emailMatchQuery("email", unnamed)).select("email name").lean();
           for (const account of accounts) {
             const accountName = String(account.name || "").trim();
             if (accountName) accountNames.set(address(account.email), accountName);
@@ -1096,7 +1113,7 @@ exports.getFeedbackSummary = async (req, res) => {
 // GET /events/suggestions
 exports.getSuggestions = async (req, res) => {
   try {
-    const authority = await Authority.findOne(sameStoredEmail("$email", req.user.email));
+    const authority = await Authority.findOne(emailMatchQuery("email", req.user.email));
     if (!authority?.universityId) return res.status(403).json({ ok: false, message: "Not an authority" });
 
     const campus = { status: { $in: ["PUBLISHED", "CLOSED"] }, universityId: authority.universityId };

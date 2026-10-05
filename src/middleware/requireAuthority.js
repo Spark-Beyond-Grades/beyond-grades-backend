@@ -1,5 +1,5 @@
 const Authority = require("../models/Authority");
-const { sameStoredEmail } = require("../utils/emailQuery");
+const { emailMatchQuery } = require("../utils/emailQuery");
 const { admin, initFirebaseAdmin } = require("../config/firebaseAdmin");
 
 initFirebaseAdmin();
@@ -18,7 +18,7 @@ async function requireAuthority(req, res, next) {
     const email = (decoded.email || "").toLowerCase();
     if (!email) return res.status(400).json({ ok: false, message: "No email in token" });
 
-    const authority = await Authority.findOne(sameStoredEmail("$email", email));
+    const authority = await Authority.findOne(emailMatchQuery("email", email));
     if (!authority || authority.isActive === false) {
       return res.status(403).json({ ok: false, message: "Access denied" });
     }

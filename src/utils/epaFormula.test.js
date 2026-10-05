@@ -144,6 +144,25 @@ test("a negative committee weight produces no score", () => {
   assert.equal(result.participants[0].eventScore, null);
 });
 
+test("an event with no skills does not invent reviews to give", () => {
+  const result = scoreEvent({
+    skills: [],
+    participants: [
+      { email: "a@b.com", level: "Head", committee: "Ops" },
+      { email: "c@d.com", level: "Head", committee: "Ops" },
+    ],
+    submissions: [{
+      raterEmail: "c@d.com",
+      targetEmail: "a@b.com",
+      ratings: [{ skill: "Planning", score: 8, skipped: false }],
+    }],
+    config: config(),
+  });
+  assert.equal(result.coverage.submittedReviews, 0);
+  assert.equal(result.coverage.expectedReviews, null);
+  assert.equal(result.coverage.countable, false);
+});
+
 test("a negative relevance produces no score", () => {
   const result = scoreEvent({
     skills: ["Planning"],
@@ -248,6 +267,31 @@ test("one valid rating round-trips through the admin scale", () => {
   assert.equal(target.status, "READY");
   assert.ok(Math.abs(target.eventScore - 8) < 1e-9);
   assert.ok(target.confidence > 0 && target.confidence < 1);
+});
+
+test("one peer rating of 8 on a 1 to 10 scale is the shared fixture", () => {
+  const result = scoreEvent({
+    skills: ["Planning"],
+    participants: [
+      { email: "target@example.com", level: "Volunteer", committee: "Ops" },
+      { email: "rater@example.com", level: "Volunteer", committee: "Ops" },
+    ],
+    submissions: [{
+      raterEmail: "rater@example.com",
+      targetEmail: "target@example.com",
+      ratings: [{ skill: "Planning", score: 8, skipped: false }],
+    }],
+    config: config(),
+  });
+  const target = result.participants.find((person) => person.email === "target@example.com");
+  const skill = target.skills.find((row) => row.skill === "Planning");
+  assert.equal(result.formulaVersion, "epa-reindexed-v1");
+  assert.equal(target.eventScore, 8);
+  assert.equal(target.confidence, 1 / 6);
+  assert.equal(skill.score, 8);
+  assert.equal(skill.confidence, 1 / 6);
+  assert.equal(skill.ratingCount, 1);
+  assert.equal(skill.reason, null);
 });
 
 test("a review whose emails contain a space still scores the roster person", () => {
@@ -508,14 +552,14 @@ test("zero relevance produces no numeric score", () => {
   assert.equal(target.eventScore, null);
 });
 
-test("cross-event combination follows the saved rule and refuses mixed rules", () => {
+test("cross-event combination always uses confidence weighting", () => {
   assert.equal(combineOverall([
     { status: "READY", eventScore: 4, confidence: 0.5, scaleMin: 1, scaleMax: 10, crossEventRule: "equal" },
     { status: "READY", eventScore: 8, confidence: 0.5, scaleMin: 1, scaleMax: 10, crossEventRule: "equal" },
   ]).score, 6);
   assert.equal(combineOverall([
     { status: "READY", eventScore: 8, confidence: 1, scaleMin: 1, scaleMax: 10, crossEventRule: "none" },
-  ]).reason, "cross_event_disabled");
+  ]).score, 8);
   assert.equal(combineOverall([
     { status: "READY", eventScore: 8, confidence: 1, scaleMin: 1, scaleMax: 10, crossEventRule: "equal" },
     { status: "READY", eventScore: 4, confidence: 1, scaleMin: 0, scaleMax: 10, crossEventRule: "equal" },
@@ -523,11 +567,11 @@ test("cross-event combination follows the saved rule and refuses mixed rules", (
   assert.equal(combineOverall([
     { status: "READY", eventScore: 8, confidence: 1, scaleMin: 1, scaleMax: 10, crossEventRule: "equal" },
     { status: "READY", eventScore: 4, confidence: 1, scaleMin: 1, scaleMax: 10, crossEventRule: "confidence" },
-  ]).reason, "mixed_cross_event_rules");
+  ]).score, 6);
   assert.equal(combineOverall([
     { status: "READY", eventScore: 8, confidence: 1, scaleMin: 1, scaleMax: 10, crossEventRule: "equal" },
     { status: "READY", eventScore: 4, confidence: 1, scaleMin: 1, scaleMax: 10, crossEventRule: "none" },
-  ]).score, 8);
+  ]).score, 6);
   assert.equal(combineOverall([
     { status: "READY", eventScore: 8, confidence: 1, scaleMin: 1, scaleMax: 10, crossEventRule: "equal" },
     { status: "NOT_ELIGIBLE", eventScore: null, confidence: null, scaleMin: 1, scaleMax: 10, crossEventRule: "confidence" },
@@ -571,8 +615,43 @@ test("turning scoring off keeps the review count and removes the numeric score",
   assert.equal(result.eligible, false);
   assert.equal(result.coverage.submittedReviews, 1);
   assert.equal(result.coverage.expectedReviews, 2);
+  assert.equal(result.coverage.countable, true);
   assert.equal(result.participants[0].status, "NOT_ELIGIBLE");
   assert.equal(result.participants[0].eventScore, null);
+  assert.equal(result.participants[0].confidence, null);
+  assert.equal(result.participants[0].skills[0].skill, "Planning");
+  assert.ok(result.participants[0].skills[0].score != null);
+  assert.ok(result.participants[0].skills[0].confidence != null);
+  const included = scoreEvent({
+    skills: ["Planning"],
+    participants: [
+      { email: "target@example.com", level: "Volunteer", committee: "Ops" },
+      { email: "rater@example.com", level: "Volunteer", committee: "Ops" },
+    ],
+    submissions: [{
+      raterEmail: "rater@example.com",
+      targetEmail: "target@example.com",
+      ratings: [{ skill: "Planning", score: 8, skipped: false }],
+    }],
+    config: config(),
+  });
+  assert.equal(result.participants[0].skills[0].score, included.participants[0].skills[0].score);
+  assert.equal(result.participants[0].skills[0].confidence, included.participants[0].skills[0].confidence);
+  assert.ok(included.participants[0].eventScore != null);
+});
+
+test("turning scoring off before the formula is filled does not invent a skill score", () => {
+  const result = scoreEvent({
+    skills: ["Planning"],
+    participants: [{ email: "target@example.com", level: "Volunteer", committee: "Ops" }],
+    submissions: [],
+    config: { contributesToScoring: false },
+  });
+  assert.equal(result.configured, true);
+  assert.equal(result.eligible, false);
+  assert.equal(result.participants[0].status, "NOT_ELIGIBLE");
+  assert.equal(result.participants[0].eventScore, null);
+  assert.deepEqual(result.participants[0].skills, []);
 });
 
 test("a submitted review counts toward rater volume even when that skill was skipped", () => {
@@ -598,6 +677,64 @@ test("a submitted review counts toward rater volume even when that skill was ski
     config: config({ credibilityEpsilon: 0.05, credibilityShrinkage: 5 }),
   }).participants.find((person) => person.email === "target@example.com").eventScore;
   assert.notEqual(score(base), score(withSkip));
+});
+
+test("ignoring an incomplete review still counts it toward rater volume", () => {
+  const participants = [
+    { email: "target@example.com", level: "Volunteer", committee: "Ops" },
+    { email: "other@example.com", level: "Volunteer", committee: "Ops" },
+    { email: "rater-a@example.com", level: "Volunteer", committee: "Ops" },
+    { email: "rater-b@example.com", level: "Volunteer", committee: "Ops" },
+  ];
+  const base = [
+    { raterEmail: "rater-a@example.com", targetEmail: "target@example.com", ratings: [{ skill: "Planning", score: 10, skipped: false }] },
+    { raterEmail: "rater-a@example.com", targetEmail: "other@example.com", ratings: [{ skill: "Planning", score: 10, skipped: false }] },
+    { raterEmail: "rater-b@example.com", targetEmail: "target@example.com", ratings: [{ skill: "Planning", score: 1, skipped: false }] },
+  ];
+  const withSkip = [
+    ...base,
+    { raterEmail: "rater-a@example.com", targetEmail: "rater-b@example.com", ratings: [{ skill: "Planning", score: null, skipped: true }] },
+  ];
+  const settings = config({ blankSkillPolicy: "ignorePair", credibilityEpsilon: 0.05, credibilityShrinkage: 5 });
+  const score = (submissions) => scoreEvent({
+    skills: ["Planning"],
+    participants,
+    submissions,
+    config: settings,
+  }).participants.find((person) => person.email === "target@example.com").eventScore;
+  assert.notEqual(score(base), score(withSkip));
+});
+
+test("ignoring an incomplete review drops its scores", () => {
+  const result = scoreEvent({
+    skills: ["Planning", "Speaking"],
+    participants: [
+      { email: "target@example.com", level: "Volunteer", committee: "Ops" },
+      { email: "complete@example.com", level: "Volunteer", committee: "Ops" },
+      { email: "partial@example.com", level: "Volunteer", committee: "Ops" },
+    ],
+    submissions: [
+      {
+        raterEmail: "complete@example.com",
+        targetEmail: "target@example.com",
+        ratings: [
+          { skill: "Planning", score: 2, skipped: false },
+          { skill: "Speaking", score: 2, skipped: false },
+        ],
+      },
+      {
+        raterEmail: "partial@example.com",
+        targetEmail: "target@example.com",
+        ratings: [
+          { skill: "Planning", score: 10, skipped: false },
+          { skill: "Speaking", score: null, skipped: true },
+        ],
+      },
+    ],
+    config: config({ blankSkillPolicy: "ignorePair" }),
+  });
+  const target = result.participants.find((person) => person.email === "target@example.com");
+  assert.equal(target.eventScore, 2);
 });
 
 test("a saved minimum sample labels the score provisional without changing it", () => {
