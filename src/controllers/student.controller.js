@@ -221,12 +221,26 @@ function eventScoreSnapshot(event, participants, submissions) {
       })),
     };
   }
-  return scoreEvent({
-    skills: event.skills || [],
-    participants,
-    submissions,
-    config: event.scoringConfig,
-  });
+  // Student-facing EPA is intentionally unavailable until the authority
+  // finalizes the event. The authority preview endpoint is the only place
+  // that may score an open event.
+  return {
+    formulaVersion: FORMULA_VERSION,
+    configured: Boolean(event.scoringConfig),
+    eligible: event.scoringConfig?.contributesToScoring !== false,
+    missing: [],
+    scaleMin: null,
+    scaleMax: null,
+    crossEventRule: "confidence",
+    participants: participants.map((person) => ({
+      email: person.email,
+      eventScore: null,
+      confidence: null,
+      status: "NO_DATA",
+      reason: "awaiting_finalization",
+      skills: (event.skills || []).map((skill) => ({ skill, score: null, confidence: null, ratingCount: 0, reason: "awaiting_finalization" })),
+    })),
+  };
 }
 
 function crossEventRuleFor(event, scored) {
@@ -399,9 +413,6 @@ function listedSkills(skills) {
 function feedbackWindowState(event, now = new Date()) {
   if (!event || event.status === "CLOSED" || event.closeAtActual) return "closed";
   if (event.openAt && new Date(event.openAt).getTime() > now.getTime()) return "scheduled";
-  if (event.closeAtTentative && new Date(event.closeAtTentative).getTime() < now.getTime() && event.scoringConfig?.lateSubmissions !== "allow") {
-    return event.scoringConfig?.lateSubmissions === "reject" ? "closed" : "late_unset";
-  }
   return "open";
 }
 
@@ -1158,15 +1169,6 @@ exports.submitEventFeedback = async (req, res) => {
     if (event.openAt && new Date(event.openAt).getTime() > Date.now()) {
       return res.status(403).json({ ok: false, message: "Feedback is not open yet" });
     }
-    if (event.closeAtTentative && new Date(event.closeAtTentative).getTime() < Date.now()) {
-      if (event.scoringConfig?.lateSubmissions === "reject") {
-        return res.status(403).json({ ok: false, message: "Feedback window has closed" });
-      }
-      if (event.scoringConfig?.lateSubmissions !== "allow") {
-        return res.status(400).json({ ok: false, message: "Late submission policy is not set" });
-      }
-    }
-
     const normalizedRaterEmail = storedAddress(raterEmail);
     const normalizedTargetEmail = storedAddress(targetEmail);
     const raterParticipant = await Participant.findOne({

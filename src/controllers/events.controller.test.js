@@ -1904,6 +1904,20 @@ test("previewEventScores returns the frozen snapshot after close", async () => {
   }
 });
 
+test("recalculateEventScores refuses to change an EPA that was already finalized", async () => {
+  const originalFindOne = Event.findOne;
+  Event.findOne = async () => ({
+    status: "CLOSED",
+    closeAtActual: new Date(),
+    frozenScores: { participants: [{ email: "target@example.com", eventScore: 8 }] },
+  });
+  const response = createResponse();
+  await recalculateEventScores({ params: { id: "event-1" }, user: { groupId: "authority-group" } }, response);
+  assert.equal(response.statusCode, 410);
+  assert.match(response.body.message, /Calculate EPA & End Feedback/i);
+  Event.findOne = originalFindOne;
+});
+
 test("recalculateEventScores keeps the previous snapshot in audit history", async () => {
   const originals = {
     findOne: Event.findOne,

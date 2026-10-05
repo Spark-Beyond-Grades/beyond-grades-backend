@@ -863,24 +863,7 @@ exports.recalculateEventScores = async (req, res) => {
   try {
     const event = await Event.findOne({ _id: req.params.id, groupId: req.user.groupId }, { frozenScoreHistory: 0 });
     if (!event) return res.status(404).json({ ok: false, message: "Event not found" });
-    await archivePreviousSnapshot(event);
-    const participants = await Participant.find({ eventId: event._id }).lean();
-    const submissions = await FeedbackSubmission.find({ eventId: event._id, submittedAt: { $ne: null } }).lean();
-    event.frozenScores = await withParticipantNames({
-      ...withAudit(scoreEvent({
-        skills: event.skills || [],
-        participants,
-        submissions,
-        config: event.scoringConfig,
-      }), event),
-      frozenAt: new Date(),
-    }, participants);
-    event.markModified("frozenScores");
-    await event.save();
-    const history = Array.isArray(event.frozenScoreHistory)
-      ? event.frozenScoreHistory
-      : await scoreHistoryTimes(event._id);
-    return res.json({ ok: true, frozenScores: event.frozenScores, history });
+    return res.status(410).json({ ok: false, message: "EPA is finalized only by Calculate EPA & End Feedback" });
   } catch (err) {
     console.error("recalculateEventScores error:", err);
     return res.status(500).json({ ok: false, message: "Failed to recalculate scores" });
