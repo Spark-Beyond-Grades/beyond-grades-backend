@@ -1,6 +1,6 @@
 # EPA scoring contract
 
-The only score is `epa-reindexed-v1` in `src/utils/epaFormula.js`. The phone does not calculate EPA. Closed events keep the snapshot in `event.frozenScores`; recalculation appends the previous snapshot to `frozenScoreHistory`.
+The only score is `epa-reindexed-v1` in `src/utils/epaFormula.js`. The phone does not calculate EPA. An authority's **Calculate EPA & End Feedback** action is the only operation that persists an event EPA: it closes the feedback window and stores an immutable snapshot in `event.frozenScores`. Student-facing endpoints do not expose a score before that action, and recalculation is not supported.
 
 ## Separate metrics
 
@@ -18,7 +18,7 @@ Every formula value comes from the event's scoring config. If a required setting
 
 Required settings: scale minimum and maximum, level influence, the three committee weights, credibility constant, credibility shrinkage, confidence prior, even-median rule, self-rating choice, blank-skill policy, unscored-skill policy, cross-event rule, whether relevance replaces skill weights, whether the event contributes to EPA, and a rank for every participant level plus a relevance for every committee and skill. Skill weights are required when relevance is not used as the skill weight.
 
-Optional settings: a minimum review count, which labels a smaller sample provisional without changing the number; late-review policy; and whether anonymous comments are shown.
+Optional settings: a minimum review count, which labels a smaller sample provisional without changing the final number; late-review policy metadata; and whether anonymous comments are shown.
 
 ## Pipeline
 
@@ -30,4 +30,4 @@ Event confidence uses the same skill weights as event EPA. A skill with no usabl
 
 ## Privacy
 
-Comments are returned only when the organizer turns them on, and never with the rater's identity. Whether the organizer can see who reviewed whom is optional and does not change the numeric score. A public profile is opt-in, revocable, and addressed by a hashed token. The raw token is not stored. Provisional scores stay visible and are labeled provisional.
+Comments are returned only when the organizer turns them on, and never with the rater's identity. Whether the organizer can see who reviewed whom is optional and does not change the numeric score. A public profile is opt-in, revocable, and addressed by a hashed token. The raw token is not stored. An open event may have an authority-only preview, but student-facing scores remain unavailable until finalization; the finalized snapshot is labeled final.
