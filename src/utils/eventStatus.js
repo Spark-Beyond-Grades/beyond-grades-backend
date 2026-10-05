@@ -21,8 +21,6 @@ function joinablePublishedFilter(now = new Date()) {
     status: "PUBLISHED",
     $nor: [
       { closeAtActual: { $exists: true, $ne: null } },
-      { eventEndDate: { $lte: now } },
-      { eventEndDate: null, eventStartDate: null, eventDate: { $lte: now } },
     ],
   };
 }

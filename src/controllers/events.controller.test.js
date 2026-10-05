@@ -96,7 +96,7 @@ test("getStudentFeed uses verified user uid instead of query uid", async () => {
 
     Event.find = (filter) => {
       assert.strictEqual(filter.status, "PUBLISHED");
-      assert.ok(filter.$nor.some((clause) => clause.eventEndDate && clause.eventEndDate.$lte instanceof Date));
+      assert.deepStrictEqual(filter.$nor, [{ closeAtActual: { $exists: true, $ne: null } }]);
       return {
         sort() {
           return this;
@@ -139,7 +139,7 @@ test("getStudentFeed returns the first cursor page with pagination metadata", as
 
     Event.find = (filter) => {
       assert.strictEqual(filter.status, "PUBLISHED");
-      assert.ok(filter.$nor.some((clause) => clause.eventEndDate && clause.eventEndDate.$lte instanceof Date));
+      assert.deepStrictEqual(filter.$nor, [{ closeAtActual: { $exists: true, $ne: null } }]);
       return queryChain(rows, (sort) => {
         assert.deepStrictEqual(sort, { createdAt: -1, _id: -1 });
       });
@@ -225,7 +225,7 @@ test("getStudentFeed filters university and outside events using student univers
     Event.find = (filter) => {
       assert.strictEqual(filter.status, "PUBLISHED");
       assert.deepStrictEqual(filter.universityId, new mongoose.Types.ObjectId(HOME_UNIVERSITY_ID));
-      assert.ok(filter.$nor.some((clause) => clause.eventEndDate && clause.eventEndDate.$lte instanceof Date));
+      assert.deepStrictEqual(filter.$nor, [{ closeAtActual: { $exists: true, $ne: null } }]);
       return queryChain([
         eventRecord("64f000000000000000000011", "Home", "2026-04-28T10:00:00.000Z", HOME_UNIVERSITY_ID),
       ]);
@@ -236,7 +236,7 @@ test("getStudentFeed filters university and outside events using student univers
     Event.find = (filter) => {
       assert.strictEqual(filter.status, "PUBLISHED");
       assert.deepStrictEqual(filter.universityId, { $ne: new mongoose.Types.ObjectId(HOME_UNIVERSITY_ID) });
-      assert.ok(filter.$nor.some((clause) => clause.eventEndDate && clause.eventEndDate.$lte instanceof Date));
+      assert.deepStrictEqual(filter.$nor, [{ closeAtActual: { $exists: true, $ne: null } }]);
       return queryChain([
         eventRecord("64f000000000000000000012", "Outside", "2026-04-28T09:00:00.000Z", OUTSIDE_UNIVERSITY_ID),
       ]);
@@ -305,7 +305,7 @@ test("getStudentFeed uses Atlas Search pipeline for case-insensitive fuzzy searc
         equals: { path: "status", value: "PUBLISHED" },
       });
       assert.deepStrictEqual(pipeline[1].$match.universityId, new mongoose.Types.ObjectId(HOME_UNIVERSITY_ID));
-      assert.ok(pipeline[1].$match.$nor.some((clause) => clause.eventEndDate && clause.eventEndDate.$lte instanceof Date));
+      assert.deepStrictEqual(pipeline[1].$match.$nor, [{ closeAtActual: { $exists: true, $ne: null } }]);
       assert.deepStrictEqual(pipeline[2], { $sort: { createdAt: -1, _id: -1 } });
       assert.deepStrictEqual(pipeline[3], { $limit: 21 });
 

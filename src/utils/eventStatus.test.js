@@ -59,13 +59,13 @@ test("computeEffectiveStatus does not treat a start date as the end", () => {
   );
 });
 
-test("joinablePublishedFilter hides a published event after its calendar end", () => {
+test("joinablePublishedFilter keeps past-ended published events in the student feed", () => {
   const now = new Date("2026-05-01T10:00:00.000Z");
   const filter = joinablePublishedFilter(now);
   assert.strictEqual(filter.status, "PUBLISHED");
-  assert.deepStrictEqual(filter.$nor[0], { closeAtActual: { $exists: true, $ne: null } });
-  assert.deepStrictEqual(filter.$nor[1], { eventEndDate: { $lte: now } });
-  assert.deepStrictEqual(filter.$nor[2], { eventEndDate: null, eventStartDate: null, eventDate: { $lte: now } });
+  assert.deepStrictEqual(filter.$nor, [
+    { closeAtActual: { $exists: true, $ne: null } },
+  ]);
 });
 
 test("computeEffectiveStatus keeps event-only published events as published when dates are absent", () => {
